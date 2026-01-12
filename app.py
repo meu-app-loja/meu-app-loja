@@ -10,162 +10,152 @@ st.set_page_config(page_title="Sistema de Estoque Nuvem", layout="wide")
 
 # --- CONEXÃO COM GOOGLE SHEETS (O COFRE) ---
 def conectar_google_sheets():
-    # Pega a senha que guardamos no Secrets
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    
-    # Transforma o texto do Secrets em um formato que o Google entende
-    json_creds = json.loads(st.secrets["service_account_json"])
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(json_creds, scope)
-    client = gspread.authorize(creds)
-    
-    # Abre a planilha 'loja_dados'
-    # Se der erro aqui, é porque o nome da planilha no Google não é 'loja_dados'
-    # ou o email do robô não foi colocado como Editor.
-    sheet = client.open("loja_dados").sheet1 
-    return sheet
+    try:
+        # Pega a senha que guardamos no Secrets
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        
+        # O segredo vem como texto, transformamos em dicionário
+        json_creds = json.loads(st.secrets["service_account_json"])
+        
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(json_creds, scope)
+        client = gspread.authorize(creds)
+        
+        # Abre a planilha 'loja_dados'
+        sheet = client.open("loja_dados").sheet1 
+        return sheet
+    except Exception as e:
+        return None
 
 # --- FUNÇÃO PARA LER O ESTOQUE ---
 def carregar_dados():
+    sheet = conectar_google_sheets()
+    if sheet is None:
+        return None # Retorna vazio se der erro na conexão
+        
     try:
-        sheet = conectar_google_sheets()
         dados = sheet.get_all_records()
         df = pd.DataFrame(dados)
         
-        # Se a planilha estiver vazia no começo, cria colunas padrão
+        # Se a planilha estiver vazia, cria estrutura padrão
         if df.empty:
             return pd.DataFrame(columns=["Código", "Produto", "Quantidade", "Preço"])
             
+        # Garante que colunas numéricas sejam números
+        if "Quantidade" in df.columns:
+            df["Quantidade"] = pd.to_numeric(df["Quantidade"], errors='coerce').fillna(0)
+            
         return df
-    except Exception as e:
-        st.error(f"Erro ao conectar com a planilha: {e}")
-        return pd.DataFrame()
+    except:
+        return pd.DataFrame(columns=["Código", "Produto", "Quantidade", "Preço"])
 
 # --- FUNÇÃO PARA SALVAR NO ESTOQUE ---
 def salvar_dados(df_novo):
     sheet = conectar_google_sheets()
-    sheet.clear() # Limpa a planilha antiga
-    # Atualiza com os dados novos (cabeçalho + dados)
-    sheet.update([df_novo.columns.values.tolist()] + df_novo.values.tolist())
+    if sheet is not None:
+        sheet.clear() # Limpa tudo
+        # Sobrescreve com os dados novos
+        sheet.update([df_novo.columns.values.tolist()] + df_novo.values.tolist())
 
-# --- BARRA LATERAL (MENU) ---
-menu = st.sidebar.selectbox("Escolha uma opção:", 
-    ["📊 Ver Estoque", "📥 Importar Planilha (Planograma)", "📄 Entrada de Notas (XML)", "💰 Registrar Venda Manual"])
-
+# --- INÍCIO DO APP ---
 st.title("🛒 Controle de Estoque na Nuvem")
 
-# --- CARREGA O ESTOQUE ATUAL DO GOOGLE ---
+# Tenta carregar os dados
 df_estoque = carregar_dados()
+
+# SE A CONEXÃO FALHAR (O erro que você estava vendo)
+if df_estoque is None:
+    st.error("🚨 ERRO DE CONEXÃO COM O GOOGLE!")
+    st.write("O problema está na configuração do 'Secrets' no site do Streamlit.")
+    st.info("Dica: Verifique se você copiou o arquivo JSON inteiro e colocou entre as aspas triplas.")
+    st.stop() # Para o código aqui
+
+# --- MENU LATERAL ---
+menu = st.sidebar.selectbox("Menu Principal", 
+    ["📊 Ver Estoque", "📥 Importar Planilha (Excel)", "📄 Entrada de Notas (XML)", "💰 Registrar Venda"])
 
 # ---------------------------------------------------------
 # MENU 1: VER ESTOQUE
 # ---------------------------------------------------------
 if menu == "📊 Ver Estoque":
-    st.subheader("Estoque Atual (Salvo no Google Sheets)")
-    
+    st.subheader("Estoque Atual")
     if df_estoque.empty:
-        st.warning("Seu estoque está vazio! Vá em 'Importar Planilha' para começar.")
+        st.warning("Estoque vazio. Importe uma planilha para começar.")
     else:
-        # Mostra a tabela colorida e bonita
         st.dataframe(df_estoque, use_container_width=True)
-        
-        # Filtros rápidos
-        st.divider()
-        st.metric("Total de Produtos Cadastrados", len(df_estoque))
-        if "Quantidade" in df_estoque.columns:
-             st.metric("Total de Itens Físicos", df_estoque["Quantidade"].sum())
+        st.metric("Total de Produtos", len(df_estoque))
 
 # ---------------------------------------------------------
-# MENU 2: IMPORTAR PLANILHA (DO SEU SISTEMA DE VENDAS)
+# MENU 2: IMPORTAR EXCEL
 # ---------------------------------------------------------
-elif menu == "📥 Importar Planilha (Planograma)":
+elif menu == "📥 Importar Planilha (Excel)":
     st.subheader("Atualizar Estoque via Excel")
-    st.info("Exporte o 'Planograma' do seu sistema antigo e solte aqui.")
+    st.write("Use isso para subir o 'Planograma' ou listagem do seu sistema antigo.")
     
-    arquivo = st.file_uploader("Arraste seu arquivo Excel aqui", type=["xlsx", "xls"])
+    arquivo = st.file_uploader("Arraste o Excel aqui", type=["xlsx", "xls"])
     
     if arquivo:
         try:
             df_novo = pd.read_excel(arquivo)
-            
-            # Mostra uma prévia para conferir
-            st.write("Prévia dos dados encontrados:")
+            st.write("Prévia dos dados:")
             st.dataframe(df_novo.head())
             
-            if st.button("✅ Confirmar e Substituir Estoque Online"):
+            if st.button("✅ Salvar no Sistema"):
                 salvar_dados(df_novo)
-                st.success("Sucesso! O Google Sheets foi atualizado com essa planilha.")
-                st.balloons()
-                
+                st.success("Estoque atualizado com sucesso!")
+                st.rerun() # Recarrega a página
         except Exception as e:
-            st.error(f"Erro ao ler o arquivo: {e}")
+            st.error(f"Erro ao ler Excel: {e}")
 
 # ---------------------------------------------------------
-# MENU 3: ENTRADA DE NOTAS (XML)
+# MENU 3: ENTRADA XML
 # ---------------------------------------------------------
 elif menu == "📄 Entrada de Notas (XML)":
-    st.subheader("Dar Entrada via XML")
+    st.subheader("Ler Nota Fiscal (XML)")
     
-    arquivos_xml = st.file_uploader("Solte as Notas Fiscais (XML) aqui", type=["xml"], accept_multiple_files=True)
+    arquivos = st.file_uploader("Solte os XMLs aqui", type=["xml"], accept_multiple_files=True)
     
-    if arquivos_xml and not df_estoque.empty:
-        if st.button("Processar Notas e Atualizar Estoque"):
+    if arquivos and not df_estoque.empty:
+        if st.button("Processar Entrada"):
+            encontrados = 0
+            df_estoque["Código"] = df_estoque["Código"].astype(str)
             
-            # Garantir que as colunas existem e são números
-            cols_obrigatorias = ["Código", "Quantidade"]
-            if not all(col in df_estoque.columns for col in cols_obrigatorias):
-                st.error("Sua planilha precisa ter as colunas 'Código' e 'Quantidade' para isso funcionar.")
-            else:
-                df_estoque["Quantidade"] = pd.to_numeric(df_estoque["Quantidade"], errors='coerce').fillna(0)
-                df_estoque["Código"] = df_estoque["Código"].astype(str) # Garante que código é texto para comparar
-                
-                produtos_encontrados = 0
-                
-                for arquivo in arquivos_xml:
-                    tree = ET.parse(arquivo)
+            for arq in arquivos:
+                try:
+                    tree = ET.parse(arq)
                     root = tree.getroot()
                     ns = {'nfe': 'http://www.portalfiscal.inf.br/nfe'}
                     
-                    # Procura produtos dentro do XML (estrutura padrão NFe)
                     for det in root.findall(".//nfe:det", ns):
                         prod = det.find("nfe:prod", ns)
-                        codigo_xml = prod.find("nfe:cProd", ns).text
-                        qtd_xml = float(prod.find("nfe:qCom", ns).text)
-                        nome_xml = prod.find("nfe:xProd", ns).text
+                        cod = prod.find("nfe:cProd", ns).text
+                        qtd = float(prod.find("nfe:qCom", ns).text)
                         
-                        # Tenta achar o produto no estoque pelo código
-                        mask = df_estoque["Código"] == codigo_xml
-                        
+                        # Busca e soma
+                        mask = df_estoque["Código"] == cod
                         if mask.any():
-                            df_estoque.loc[mask, "Quantidade"] += qtd_xml
-                            produtos_encontrados += 1
-                        else:
-                            st.warning(f"Produto novo (não cadastrado): {nome_xml} (Cód: {codigo_xml})")
-                            # Opcional: Adicionar produto novo automaticamente (pode ser complexo agora)
-                
-                # Salva tudo no Google Sheets
-                salvar_dados(df_estoque)
-                st.success(f"Processamento concluído! {produtos_encontrados} produtos tiveram o estoque aumentado.")
+                            df_estoque.loc[mask, "Quantidade"] += qtd
+                            encontrados += 1
+                except:
+                    st.error(f"Erro ao ler o arquivo {arq.name}")
+            
+            salvar_dados(df_estoque)
+            st.success(f"Entrada concluída! {encontrados} produtos atualizados.")
+            st.balloons()
 
 # ---------------------------------------------------------
-# MENU 4: REGISTRAR VENDA MANUAL
+# MENU 4: VENDA MANUAL
 # ---------------------------------------------------------
-elif menu == "💰 Registrar Venda Manual":
-    st.subheader("Baixa Manual de Estoque")
+elif menu == "💰 Registrar Venda":
+    st.subheader("Baixa de Estoque")
     
-    if df_estoque.empty:
-        st.warning("O estoque está vazio.")
-    else:
-        produto_selecionado = st.selectbox("Selecione o Produto", df_estoque["Produto"].unique())
-        qtd_venda = st.number_input("Quantidade Vendida", min_value=1, value=1)
+    if not df_estoque.empty:
+        prod = st.selectbox("Produto", df_estoque["Produto"].unique())
+        qtd = st.number_input("Quantidade", min_value=1, value=1)
         
-        if st.button("Confirmar Venda"):
-            # Lógica para encontrar e diminuir
-            linha = df_estoque[df_estoque["Produto"] == produto_selecionado].index[0]
-            atual = float(df_estoque.at[linha, "Quantidade"])
+        if st.button("Confirmar Baixa"):
+            idx = df_estoque[df_estoque["Produto"] == prod].index[0]
+            atual = float(df_estoque.at[idx, "Quantidade"])
+            df_estoque.at[idx, "Quantidade"] = atual - qtd
             
-            nova_qtd = atual - qtd_venda
-            df_estoque.at[linha, "Quantidade"] = nova_qtd
-            
-            # Salva na nuvem
             salvar_dados(df_estoque)
-            st.success(f"Venda registrada! Novo estoque de {produto_selecionado}: {nova_qtd}")
+            st.success(f"Venda registrada! Restam: {atual - qtd}")
