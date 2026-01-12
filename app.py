@@ -13,12 +13,41 @@ import time
 # ==============================================================================
 st.set_page_config(page_title="Gestão Multi-Lojas Pro", layout="wide", page_icon="🏪")
 
+# Definição das colunas OBRIGATÓRIAS (O sistema não vive sem elas)
+COLS_ESTOQUE = [
+    'código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central', 
+    'qtd_minima', 'validade', 'status_compra', 'qtd_comprada', 
+    'preco_custo', 'preco_venda', 'categoria', 'ultimo_fornecedor', 'preco_sem_desconto'
+]
+
 @st.cache_resource
 def get_google_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     json_creds = json.loads(st.secrets["service_account_json"])
     creds = ServiceAccountCredentials.from_json_keyfile_dict(json_creds, scope)
     return gspread.authorize(creds)
+
+# --- FUNÇÃO DE AUTO-REPARO (A CURA DO SEU PROBLEMA) ---
+def garantir_schema(df, colunas_obrigatorias):
+    """
+    Se o Excel subido bagunçou as colunas, essa função recria as que faltam
+    para evitar o KeyError.
+    """
+    if df.empty:
+        return pd.DataFrame(columns=colunas_obrigatorias)
+        
+    df.columns = df.columns.str.strip().str.lower()
+    
+    for col in colunas_obrigatorias:
+        if col not in df.columns:
+            # Se a coluna sumiu, recria ela com 0 ou vazio
+            if any(x in col for x in ['qtd', 'preco', 'valor', 'custo']):
+                df[col] = 0.0
+            else:
+                df[col] = ""
+    
+    # Retorna apenas as colunas certas, na ordem certa
+    return df[colunas_obrigatorias]
 
 @st.cache_data(ttl=60)
 def ler_da_nuvem(nome_aba, colunas_padrao):
@@ -34,7 +63,9 @@ def ler_da_nuvem(nome_aba, colunas_padrao):
         
         dados = ws.get_all_records()
         df = pd.DataFrame(dados)
-        if df.empty: return pd.DataFrame(columns=colunas_padrao)
+        
+        # APLICA A CURA AQUI
+        df = garantir_schema(df, colunas_padrao)
         
         # Converte números e datas
         for col in df.columns:
@@ -55,6 +86,10 @@ def salvar_na_nuvem(nome_aba, df):
         ws.clear()
         
         df_save = df.copy()
+        # Garante o schema antes de salvar também
+        if nome_aba.endswith("_estoque"):
+             df_save = garantir_schema(df_save, COLS_ESTOQUE)
+
         for col in df_save.columns:
             if pd.api.types.is_datetime64_any_dtype(df_save[col]):
                 df_save[col] = df_save[col].astype(str).replace('NaT', '')
@@ -100,9 +135,9 @@ def filtrar_dados_inteligente(df, coluna_busca, texto_busca):
 
 def unificar_produtos_por_codigo(df):
     if df.empty: return df
-    cols_num = ['qtd.estoque', 'qtd_central', 'qtd_minima', 'qtd_comprada', 'preco_custo', 'preco_venda', 'preco_sem_desconto']
-    for col in cols_num:
-        if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    # Usa a função de garantia para evitar erro na unificação
+    df = garantir_schema(df, COLS_ESTOQUE)
+    
     lista_final = []
     df['código de barras'] = df['código de barras'].astype(str).str.strip()
     sem_codigo = df[df['código de barras'] == ""]
@@ -125,8 +160,8 @@ def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, n
     todas_lojas = ["loja1", "loja2", "loja3"]
     for loja in todas_lojas:
         if loja == prefixo_ignorar: continue
-        cols_basic = ['código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central', 'preco_custo', 'preco_venda', 'validade', 'ultimo_fornecedor', 'preco_sem_desconto']
-        df_outra = ler_da_nuvem(f"{loja}_estoque", cols_basic)
+        # Usa COLS_ESTOQUE global
+        df_outra = ler_da_nuvem(f"{loja}_estoque", COLS_ESTOQUE)
         if not df_outra.empty:
             df_outra.columns = df_outra.columns.str.strip().str.lower()
             mask = df_outra['nome do produto'].astype(str) == str(nome_produto)
@@ -190,16 +225,16 @@ if loja_atual == "Loja 1 (Principal)": prefixo = "loja1"
 elif loja_atual == "Loja 2 (Filial)": prefixo = "loja2"
 else: prefixo = "loja3"
 
-# Colunas Padrão
-COLS_ESTOQUE = ['código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central', 'qtd_minima', 'validade', 'status_compra', 'qtd_comprada', 'preco_custo', 'preco_venda', 'categoria', 'ultimo_fornecedor', 'preco_sem_desconto']
+# Definição de TODAS as colunas para o Auto-Reparo
 COLS_HIST = ['data', 'produto', 'fornecedor', 'qtd', 'preco_pago', 'total_gasto', 'numero_nota', 'desconto_total_money', 'preco_sem_desconto']
 COLS_MOV = ['data_hora', 'produto', 'qtd_movida']
 COLS_VENDAS = ['data_hora', 'produto', 'qtd_vendida', 'estoque_restante']
 COLS_LISTA = ['produto', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status']
 COLS_OFICIAL = ['nome do produto', 'código de barras']
 
-# Carrega Estoque
+# Carrega Estoque (Com Auto-Reparo ativado)
 df = ler_da_nuvem(f"{prefixo}_estoque", COLS_ESTOQUE)
+
 if not df.empty:
     df.columns = df.columns.str.strip().str.lower()
     df['código de barras'] = df['código de barras'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
@@ -371,7 +406,7 @@ elif modo == "🏠 Gôndola (Loja)":
                                     st.success("Feito!"); st.rerun()
 
 # ------------------------------------------------------------------
-# OUTROS MÓDULOS (Resumidos para caber, mas funcionais)
+# OUTROS MÓDULOS
 # ------------------------------------------------------------------
 elif modo == "🆕 Cadastrar Produto":
     st.title("🆕 Novo"); 
@@ -391,9 +426,12 @@ elif modo == "🔄 Sincronizar (Planograma)":
             bar=st.progress(0); tot=len(r)
             for i, row in r.iterrows():
                 c=str(row[ic]).replace('.0','').strip(); n=normalizar_texto(str(row[inu])); q=pd.to_numeric(row[iq], errors='coerce')
-                msk=df['código de barras']==c
-                if msk.any(): df.loc[msk, 'qtd.estoque']=q
+                mask=df['código de barras'] == c
+                if mask.any(): 
+                    # Atualiza SÓ estoque e mantem outras colunas
+                    df.loc[mask, 'qtd.estoque'] = q
                 else: 
+                    # Cria novo, mas garantindo que qtd_central e outros existam
                     nv={'código de barras': c, 'nome do produto': n, 'qtd.estoque': q, 'qtd_central': 0, 'qtd_minima': 5, 'preco_custo': 0, 'preco_venda': 0, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'categoria': 'GERAL', 'ultimo_fornecedor': '', 'preco_sem_desconto': 0}
                     df=pd.concat([df, pd.DataFrame([nv])], ignore_index=True)
                 bar.progress((i+1)/tot)
@@ -403,7 +441,13 @@ elif modo == "🏡 Estoque Central (Casa)":
     st.title("🏡 Casa")
     b = st.text_input("Buscar:", placeholder="...")
     df_show = filtrar_dados_inteligente(df, 'nome do produto', b)
-    df_ed = st.data_editor(df_show[['nome do produto', 'qtd_central', 'preco_custo', 'validade']], use_container_width=True)
+    # Proteção extra para garantir que as colunas existem
+    cols_show = ['nome do produto', 'qtd_central', 'preco_custo', 'validade']
+    for c in cols_show:
+        if c not in df_show.columns: df_show[c] = 0
+    
+    df_ed = st.data_editor(df_show[cols_show], use_container_width=True)
+    
     if st.button("Salvar"):
         df.update(df_ed); salvar_na_nuvem(f"{prefixo}_estoque", df)
         for i, r in df_ed.iterrows(): atualizar_casa_global(df.at[i,'nome do produto'], r['qtd_central'], r['preco_custo'], None, r['validade'], prefixo)
