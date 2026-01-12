@@ -5,157 +5,225 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 import xml.etree.ElementTree as ET
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Sistema de Estoque Nuvem", layout="wide")
+# --- CONFIGURAÇÃO VISUAL DA PÁGINA ---
+st.set_page_config(page_title="Sistema de Estoque Pro", layout="wide", page_icon="🛒")
 
 # --- CONEXÃO COM GOOGLE SHEETS (O COFRE) ---
 def conectar_google_sheets():
     try:
-        # Pega a senha que guardamos no Secrets
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        
-        # O segredo vem como texto, transformamos em dicionário
         json_creds = json.loads(st.secrets["service_account_json"])
-        
         creds = ServiceAccountCredentials.from_json_keyfile_dict(json_creds, scope)
         client = gspread.authorize(creds)
-        
-        # Abre a planilha 'loja_dados'
         sheet = client.open("loja_dados").sheet1 
         return sheet
     except Exception as e:
         return None
 
-# --- FUNÇÃO PARA LER O ESTOQUE ---
+# --- FUNÇÃO INTELIGENTE PARA LER E PADRONIZAR ---
 def carregar_dados():
     sheet = conectar_google_sheets()
     if sheet is None:
-        return None # Retorna vazio se der erro na conexão
-        
+        return None
+    
     try:
         dados = sheet.get_all_records()
         df = pd.DataFrame(dados)
         
-        # Se a planilha estiver vazia, cria estrutura padrão
+        # SE A PLANILHA ESTIVER VAZIA, CRIA AS COLUNAS PADRÃO AUTOMATICAMENTE
+        # Isso resolve o seu erro de KeyError!
         if df.empty:
-            return pd.DataFrame(columns=["Código", "Produto", "Quantidade", "Preço"])
+            df = pd.DataFrame(columns=["Código", "Produto", "Quantidade", "Preço", "EAN"])
             
-        # Garante que colunas numéricas sejam números
-        if "Quantidade" in df.columns:
-            df["Quantidade"] = pd.to_numeric(df["Quantidade"], errors='coerce').fillna(0)
-            
+        # Garante que as colunas essenciais existam, mesmo se o Excel vier diferente
+        colunas_padrao = ["Código", "Produto", "Quantidade"]
+        for col in colunas_padrao:
+            if col not in df.columns:
+                df[col] = "" # Cria a coluna vazia se não existir
+        
+        # Garante que Quantidade seja número e Código seja texto
+        df["Quantidade"] = pd.to_numeric(df["Quantidade"], errors='coerce').fillna(0)
+        df["Código"] = df["Código"].astype(str).str.replace(r'\.0$', '', regex=True) # Tira o .0 do final
+        
         return df
     except:
-        return pd.DataFrame(columns=["Código", "Produto", "Quantidade", "Preço"])
+        # Se der pane total, retorna uma tabela virgem para não travar o app
+        return pd.DataFrame(columns=["Código", "Produto", "Quantidade", "Preço", "EAN"])
 
-# --- FUNÇÃO PARA SALVAR NO ESTOQUE ---
+# --- FUNÇÃO PARA SALVAR ---
 def salvar_dados(df_novo):
     sheet = conectar_google_sheets()
     if sheet is not None:
-        sheet.clear() # Limpa tudo
-        # Sobrescreve com os dados novos
+        sheet.clear()
+        # Atualiza o Google Sheets
         sheet.update([df_novo.columns.values.tolist()] + df_novo.values.tolist())
 
-# --- INÍCIO DO APP ---
-st.title("🛒 Controle de Estoque na Nuvem")
+# ==============================================================================
+# INÍCIO DO APLICATIVO (A PARTE VISUAL)
+# ==============================================================================
 
-# Tenta carregar os dados
-df_estoque = carregar_dados()
+# Carrega os dados da nuvem
+df = carregar_dados()
 
-# SE A CONEXÃO FALHAR (O erro que você estava vendo)
-if df_estoque is None:
-    st.error("🚨 ERRO DE CONEXÃO COM O GOOGLE!")
-    st.write("O problema está na configuração do 'Secrets' no site do Streamlit.")
-    st.info("Dica: Verifique se você copiou o arquivo JSON inteiro e colocou entre as aspas triplas.")
-    st.stop() # Para o código aqui
+# --- MENU LATERAL BONITO ---
+st.sidebar.title("🛒 Menu Gerencial")
+menu = st.sidebar.radio("Navegação", 
+    ["📊 Painel & Busca", "📥 Atualizar via Excel", "📄 Entrada de Notas (XML)", "💰 Venda Manual"])
 
-# --- MENU LATERAL ---
-menu = st.sidebar.selectbox("Menu Principal", 
-    ["📊 Ver Estoque", "📥 Importar Planilha (Excel)", "📄 Entrada de Notas (XML)", "💰 Registrar Venda"])
+st.sidebar.divider()
+st.sidebar.info("Conectado ao Google Drive ✅")
 
 # ---------------------------------------------------------
-# MENU 1: VER ESTOQUE
+# 1. PAINEL DE BUSCA (AQUELA BUSCA ROBUSTA QUE VOCÊ GOSTA)
 # ---------------------------------------------------------
-if menu == "📊 Ver Estoque":
-    st.subheader("Estoque Atual")
-    if df_estoque.empty:
-        st.warning("Estoque vazio. Importe uma planilha para começar.")
-    else:
-        st.dataframe(df_estoque, use_container_width=True)
-        st.metric("Total de Produtos", len(df_estoque))
-
-# ---------------------------------------------------------
-# MENU 2: IMPORTAR EXCEL
-# ---------------------------------------------------------
-elif menu == "📥 Importar Planilha (Excel)":
-    st.subheader("Atualizar Estoque via Excel")
-    st.write("Use isso para subir o 'Planograma' ou listagem do seu sistema antigo.")
+if menu == "📊 Painel & Busca":
+    st.title("📊 Visão Geral do Estoque")
     
-    arquivo = st.file_uploader("Arraste o Excel aqui", type=["xlsx", "xls"])
+    if df is None:
+        st.error("Erro ao conectar no Google. Verifique o Secrets.")
+    elif df.empty:
+        st.warning("Seu estoque está vazio. Vá em 'Atualizar via Excel' para começar.")
+    else:
+        # Métricas no Topo
+        col1, col2, col3 = st.columns(3)
+        col1.metric("📦 Itens Cadastrados", len(df))
+        qtd_total = int(df["Quantidade"].sum())
+        col2.metric("🔢 Estoque Físico Total", qtd_total)
+        
+        # --- A BUSCA PODEROSA ---
+        st.divider()
+        termo_busca = st.text_input("🔍 Buscar Produto (Nome, Código ou EAN)", placeholder="Digite aqui para filtrar...")
+        
+        if termo_busca:
+            # Filtra onde o termo aparece no Nome OU no Código
+            filtro = df[
+                df["Produto"].astype(str).str.contains(termo_busca, case=False, na=False) | 
+                df["Código"].astype(str).str.contains(termo_busca, case=False, na=False)
+            ]
+            st.dataframe(filtro, use_container_width=True, height=400)
+        else:
+            st.dataframe(df, use_container_width=True, height=400)
+
+# ---------------------------------------------------------
+# 2. ATUALIZAR VIA EXCEL (PLANOGRAMA)
+# ---------------------------------------------------------
+elif menu == "📥 Atualizar via Excel":
+    st.title("📥 Importar Estoque (Excel)")
+    st.write("Use esta opção para fazer o 'upload inicial' ou substituir tudo pelo relatório do seu sistema.")
+    
+    arquivo = st.file_uploader("Arraste seu arquivo Excel (.xlsx) aqui", type=["xlsx", "xls"])
     
     if arquivo:
-        try:
-            df_novo = pd.read_excel(arquivo)
-            st.write("Prévia dos dados:")
-            st.dataframe(df_novo.head())
+        df_upload = pd.read_excel(arquivo)
+        st.write("Prévia dos dados encontrados:")
+        st.dataframe(df_upload.head(3))
+        
+        st.warning("⚠️ ATENÇÃO: Isso vai APAGAR o estoque atual do Google e colocar esse novo no lugar.")
+        
+        if st.button("✅ Confirmar Substituição"):
+            # Tenta padronizar nomes de colunas comuns
+            rename_map = {
+                "Cod": "Código", "CODIGO": "Código", "Codigo": "Código",
+                "Descricao": "Produto", "DESCRICAO": "Produto", "Nome": "Produto",
+                "Qtd": "Quantidade", "Saldo": "Quantidade", "Estoque": "Quantidade"
+            }
+            df_upload = df_upload.rename(columns=rename_map)
             
-            if st.button("✅ Salvar no Sistema"):
-                salvar_dados(df_novo)
-                st.success("Estoque atualizado com sucesso!")
-                st.rerun() # Recarrega a página
-        except Exception as e:
-            st.error(f"Erro ao ler Excel: {e}")
+            # Garante que as colunas existem
+            if "Código" not in df_upload.columns:
+                st.error("Não achei a coluna 'Código' ou 'Cod'. Verifique seu Excel.")
+            else:
+                salvar_dados(df_upload)
+                st.success("Estoque Atualizado na Nuvem! ☁️")
+                st.balloons()
+                st.rerun()
 
 # ---------------------------------------------------------
-# MENU 3: ENTRADA XML
+# 3. ENTRADA DE NOTAS (XML) - AGORA COM PROTEÇÃO
 # ---------------------------------------------------------
 elif menu == "📄 Entrada de Notas (XML)":
-    st.subheader("Ler Nota Fiscal (XML)")
+    st.title("📄 Entrada Automática (XML)")
     
-    arquivos = st.file_uploader("Solte os XMLs aqui", type=["xml"], accept_multiple_files=True)
-    
-    if arquivos and not df_estoque.empty:
-        if st.button("Processar Entrada"):
-            encontrados = 0
-            df_estoque["Código"] = df_estoque["Código"].astype(str)
-            
-            for arq in arquivos:
-                try:
-                    tree = ET.parse(arq)
-                    root = tree.getroot()
-                    ns = {'nfe': 'http://www.portalfiscal.inf.br/nfe'}
-                    
-                    for det in root.findall(".//nfe:det", ns):
-                        prod = det.find("nfe:prod", ns)
-                        cod = prod.find("nfe:cProd", ns).text
-                        qtd = float(prod.find("nfe:qCom", ns).text)
+    # Verifica se o estoque tem a estrutura mínima antes de começar
+    if df is None or df.empty or "Código" not in df.columns:
+        st.error("Para importar XML, primeiro você precisa ter um estoque cadastrado (use a opção 'Atualizar via Excel').")
+    else:
+        arquivos = st.file_uploader("Selecione os arquivos XML das Notas Fiscais", type=["xml"], accept_multiple_files=True)
+        
+        if arquivos:
+            if st.button("🚀 Processar Notas"):
+                # Garante tipos
+                df["Código"] = df["Código"].astype(str).str.strip()
+                df["Quantidade"] = pd.to_numeric(df["Quantidade"]).fillna(0)
+                
+                encontrados = 0
+                nao_encontrados = []
+                
+                progresso = st.progress(0)
+                
+                for i, arq in enumerate(arquivos):
+                    try:
+                        tree = ET.parse(arq)
+                        root = tree.getroot()
+                        ns = {'nfe': 'http://www.portalfiscal.inf.br/nfe'}
                         
-                        # Busca e soma
-                        mask = df_estoque["Código"] == cod
-                        if mask.any():
-                            df_estoque.loc[mask, "Quantidade"] += qtd
-                            encontrados += 1
-                except:
-                    st.error(f"Erro ao ler o arquivo {arq.name}")
-            
-            salvar_dados(df_estoque)
-            st.success(f"Entrada concluída! {encontrados} produtos atualizados.")
-            st.balloons()
+                        for det in root.findall(".//nfe:det", ns):
+                            prod = det.find("nfe:prod", ns)
+                            cod_xml = prod.find("nfe:cProd", ns).text.strip()
+                            qtd_xml = float(prod.find("nfe:qCom", ns).text)
+                            nome_xml = prod.find("nfe:xProd", ns).text
+                            
+                            # Tenta encontrar o produto no DataFrame (usando Código)
+                            # Remove zeros a esquerda para facilitar (opcional)
+                            
+                            mask = df["Código"] == cod_xml
+                            
+                            if mask.any():
+                                df.loc[mask, "Quantidade"] += qtd_xml
+                                encontrados += 1
+                            else:
+                                nao_encontrados.append(f"{nome_xml} (Cód: {cod_xml})")
+                                
+                    except Exception as e:
+                        st.error(f"Erro ao ler {arq.name}: {e}")
+                    
+                    progresso.progress((i + 1) / len(arquivos))
+                
+                # Salva o resultado final
+                salvar_dados(df)
+                
+                st.success(f"✅ Processamento concluído! Estoque somado para {encontrados} itens.")
+                
+                if nao_encontrados:
+                    st.warning("⚠️ Alguns produtos do XML não foram achados no seu estoque (não foram somados):")
+                    st.write(nao_encontrados)
 
 # ---------------------------------------------------------
-# MENU 4: VENDA MANUAL
+# 4. VENDA MANUAL
 # ---------------------------------------------------------
-elif menu == "💰 Registrar Venda":
-    st.subheader("Baixa de Estoque")
+elif menu == "💰 Venda Manual":
+    st.title("💰 Registrar Venda Rápida")
     
-    if not df_estoque.empty:
-        prod = st.selectbox("Produto", df_estoque["Produto"].unique())
-        qtd = st.number_input("Quantidade", min_value=1, value=1)
+    if df is None or df.empty:
+        st.warning("Estoque vazio.")
+    else:
+        # Caixa de seleção com busca integrada
+        lista_produtos = df["Produto"].astype(str) + " | Cód: " + df["Código"].astype(str)
+        escolha = st.selectbox("Busque o produto:", lista_produtos)
+        
+        # Pega o código selecionado
+        cod_selecionado = escolha.split(" | Cód: ")[1]
+        
+        qtd_venda = st.number_input("Quantidade vendida:", min_value=1, value=1)
         
         if st.button("Confirmar Baixa"):
-            idx = df_estoque[df_estoque["Produto"] == prod].index[0]
-            atual = float(df_estoque.at[idx, "Quantidade"])
-            df_estoque.at[idx, "Quantidade"] = atual - qtd
+            # Localiza e subtrai
+            idx = df[df["Código"].astype(str) == cod_selecionado].index[0]
+            atual = float(df.at[idx, "Quantidade"])
+            novo = atual - qtd_venda
             
-            salvar_dados(df_estoque)
-            st.success(f"Venda registrada! Restam: {atual - qtd}")
+            df.at[idx, "Quantidade"] = novo
+            salvar_dados(df)
+            
+            st.success(f"Venda registrada! Novo saldo: {novo}")
+            st.rerun()
