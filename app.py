@@ -9,11 +9,10 @@ import json
 import time
 
 # ==============================================================================
-# ⚙️ CONFIGURAÇÃO DE NUVEM E INTEGRIDADE (AUDITADO)
+# ⚙️ CONFIGURAÇÃO DE NUVEM E INTEGRIDADE
 # ==============================================================================
 st.set_page_config(page_title="Gestão Multi-Lojas Pro", layout="wide", page_icon="🏪")
 
-# Colunas OBRIGATÓRIAS para o funcionamento do sistema
 COLUNAS_VITAIS = [
     'código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central', 
     'qtd_minima', 'validade', 'status_compra', 'qtd_comprada', 
@@ -27,19 +26,54 @@ def get_google_client():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(json_creds, scope)
     return gspread.authorize(creds)
 
+# --- FUNÇÕES DE LÓGICA E UTILITÁRIOS (MOVIDAS PARA O TOPO) ---
+
+def normalizar_texto(texto):
+    if not isinstance(texto, str): return str(texto) if pd.notnull(texto) else ""
+    texto = unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('ASCII')
+    return texto.upper().strip()
+
+def normalizar_para_busca(texto): 
+    return normalizar_texto(texto)
+
+def filtrar_dados_inteligente(df, coluna_busca, texto_busca):
+    if not texto_busca: return df
+    mask = df[coluna_busca].astype(str).apply(lambda x: normalizar_para_busca(texto_busca) in normalizar_para_busca(x))
+    return df[mask]
+
+def calcular_pontuacao(nome_xml, nome_sistema):
+    set_xml = set(normalizar_para_busca(nome_xml).split())
+    set_sis = set(normalizar_para_busca(nome_sistema).split())
+    comum = set_xml.intersection(set_sis)
+    if not comum: return 0.0
+    total = set_xml.union(set_sis)
+    score = len(comum) / len(total)
+    for palavra in comum:
+        if any(u in palavra for u in ['L', 'ML', 'KG', 'G', 'M']): 
+            if any(c.isdigit() for c in palavra): score += 0.5
+    return score
+
+def encontrar_melhor_match(nome_buscado, lista_opcoes, cutoff=0.3):
+    melhor_match = None; maior_score = 0.0
+    for opcao in lista_opcoes:
+        if opcao == "(CRIAR NOVO)": continue
+        score = calcular_pontuacao(nome_buscado, opcao)
+        if score > maior_score: maior_score = score; melhor_match = opcao
+    if maior_score >= cutoff: return melhor_match, "Nome Similar"
+    return None, "Nenhum"
+
 def garantir_schema(df, colunas_obrigatorias):
-    """Proteção contra KeyError: Recria colunas ausentes após importação de planogramas incompletos."""
     if df.empty: return pd.DataFrame(columns=colunas_obrigatorias)
     df.columns = df.columns.str.strip().str.lower()
     for col in colunas_obrigatorias:
         if col not in df.columns:
             if any(x in col for x in ['qtd', 'preco', 'valor', 'custo']): df[col] = 0.0
             else: df[col] = ""
-    return df
+    return df[colunas_obrigatorias]
 
 @st.cache_data(ttl=60)
 def ler_da_nuvem(nome_aba, colunas_padrao):
-    time.sleep(1.2) # Pausa para estabilidade de cota
+    time.sleep(1.2)
     try:
         client = get_google_client()
         sh = client.open("loja_dados")
@@ -71,45 +105,27 @@ def salvar_na_nuvem(nome_aba, df, colunas_padrao=None):
         ws.clear()
         df_save = df.copy()
         if colunas_padrao: df_save = garantir_schema(df_save, colunas_padrao)
-        
         for col in df_save.columns:
             if pd.api.types.is_datetime64_any_dtype(df_save[col]):
                 df_save[col] = df_save[col].astype(str).replace('NaT', '')
-        
         ws.update([df_save.columns.values.tolist()] + df_save.values.tolist())
         ler_da_nuvem.clear()
     except Exception as e: st.error(f"Erro ao salvar: {e}")
 
-# ==============================================================================
-# 🧠 FUNÇÕES ORIGINAIS DE LÓGICA (INTACTAS)
-# ==============================================================================
-def normalizar_texto(texto):
-    if not isinstance(texto, str): return str(texto) if pd.notnull(texto) else ""
-    texto = unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('ASCII')
-    return texto.upper().strip()
-
-def normalizar_para_busca(texto): return normalizar_texto(texto)
-
-def calcular_pontuacao(nome_xml, nome_sistema):
-    set_xml = set(normalizar_para_busca(nome_xml).split())
-    set_sis = set(normalizar_para_busca(nome_sistema).split())
-    comum = set_xml.intersection(set_sis)
-    if not comum: return 0.0
-    total = set_xml.union(set_sis)
-    score = len(comum) / len(total)
-    for palavra in comum:
-        if any(u in palavra for u in ['L', 'ML', 'KG', 'G', 'M']): 
-            if any(c.isdigit() for c in palavra): score += 0.5
-    return score
-
-def encontrar_melhor_match(nome_buscado, lista_opcoes, cutoff=0.3):
-    melhor_match = None; maior_score = 0.0
-    for opcao in lista_opcoes:
-        if opcao == "(CRIAR NOVO)": continue
-        score = calcular_pontuacao(nome_buscado, opcao)
-        if score > maior_score: maior_score = score; melhor_match = opcao
-    if maior_score >= cutoff: return melhor_match, "Nome Similar (Palavras)"
-    return None, "Nenhum"
+def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, nova_validade, prefixo_ignorar):
+    todas_lojas = ["loja1", "loja2", "loja3"]
+    for loja in todas_lojas:
+        if loja == prefixo_ignorar: continue
+        df_outra = ler_da_nuvem(f"{loja}_estoque", COLUNAS_VITAIS)
+        if not df_outra.empty:
+            mask = df_outra['nome do produto'].astype(str) == str(nome_produto)
+            if mask.any():
+                idx = df_outra[mask].index[0]
+                df_outra.at[idx, 'qtd_central'] = qtd_nova_casa
+                if novo_custo is not None: df_outra.at[idx, 'preco_custo'] = novo_custo
+                if novo_venda is not None: df_outra.at[idx, 'preco_venda'] = novo_venda
+                if nova_validade is not None: df_outra.at[idx, 'validade'] = nova_validade
+                salvar_na_nuvem(f"{loja}_estoque", df_outra, COLUNAS_VITAIS)
 
 def unificar_produtos_por_codigo(df):
     if df.empty: return df
@@ -132,45 +148,12 @@ def unificar_produtos_por_codigo(df):
     if not sem_codigo.empty: df_novo = pd.concat([df_novo, sem_codigo], ignore_index=True)
     return df_novo
 
-def processar_excel_oficial(arquivo_subido):
-    try:
-        df_temp = pd.read_csv(arquivo_subido) if arquivo_subido.name.endswith('.csv') else pd.read_excel(arquivo_subido)
-        if 'obrigatório' in str(df_temp.iloc[0].values): df_temp = df_temp.iloc[1:].reset_index(drop=True)
-        df_temp.columns = df_temp.columns.str.strip()
-        col_nome = next((c for c in df_temp.columns if 'nome' in c.lower()), 'Nome')
-        col_cod = next((c for c in df_temp.columns if 'código' in c.lower() or 'barras' in c.lower()), 'Código de Barras Primário')
-        df_limpo = df_temp[[col_nome, col_cod]].copy()
-        df_limpo.columns = ['nome do produto', 'código de barras']
-        df_limpo['nome do produto'] = df_limpo['nome do produto'].apply(normalizar_texto)
-        df_limpo['código de barras'] = df_limpo['código de barras'].astype(str).str.replace('.0', '', regex=False).str.strip()
-        salvar_na_nuvem("base_oficial", df_limpo)
-        return True
-    except: return False
-
-def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, nova_validade, prefixo_ignorar):
-    todas_lojas = ["loja1", "loja2", "loja3"]
-    for loja in todas_lojas:
-        if loja == prefixo_ignorar: continue
-        df_outra = ler_da_nuvem(f"{loja}_estoque", COLUNAS_VITAIS)
-        if not df_outra.empty:
-            mask = df_outra['nome do produto'].astype(str) == str(nome_produto)
-            if mask.any():
-                idx = df_outra[mask].index[0]
-                df_outra.at[idx, 'qtd_central'] = qtd_nova_casa
-                if novo_custo is not None: df_outra.at[idx, 'preco_custo'] = novo_custo
-                if novo_venda is not None: df_outra.at[idx, 'preco_venda'] = novo_venda
-                if nova_validade is not None: df_outra.at[idx, 'validade'] = nova_validade
-                salvar_na_nuvem(f"{loja}_estoque", df_outra, COLUNAS_VITAIS)
-
-# --- FUNÇÃO XML HÍBRIDA (SUPORTA O NOVO XML) ---
 def ler_xml_nfe(arquivo_xml, df_referencia):
     tree = ET.parse(arquivo_xml); root = tree.getroot()
     def tag_limpa(element): return element.tag.split('}')[-1]
     dados_nota = {'numero': 'S/N', 'fornecedor': 'IMPORTADO', 'data': datetime.now(), 'itens': []}
-    
-    # Detecção de Formato
     itens_custom = root.findall(".//Item")
-    if itens_custom: # Formato Novo enviado pelo usuário
+    if itens_custom:
         for it in itens_custom:
             try:
                 nome = it.find("Nome").text
@@ -179,7 +162,7 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
                 ean = it.find("CodigoBarras").text
                 dados_nota['itens'].append({'nome': normalizar_texto(nome), 'qtd': qtd, 'ean': str(ean).strip(), 'preco_un_liquido': valor/qtd if qtd>0 else 0, 'preco_un_bruto': valor/qtd if qtd>0 else 0, 'desconto_total_item': 0})
             except: continue
-    else: # Formato Oficial NFe
+    else:
         for elem in root.iter():
             tag = tag_limpa(elem)
             if tag == 'nNF': dados_nota['numero'] = elem.text
@@ -197,6 +180,7 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
 # ==============================================================================
 # 🏢 NAVEGAÇÃO E CARREGAMENTO
 # ==============================================================================
+
 st.sidebar.title("🏢 Seleção da Loja")
 loja_atual = st.sidebar.selectbox("Gerenciar unidade?", ["Loja 1 (Principal)", "Loja 2 (Filial)", "Loja 3 (Extra)"])
 st.sidebar.markdown("---")
@@ -205,13 +189,17 @@ st.sidebar.markdown("---")
 
 prefixo = "loja1" if "1" in loja_atual else "loja2" if "2" in loja_atual else "loja3"
 
-# Carregamento Lazy (Sempre garantindo as colunas vitais)
 df = ler_da_nuvem(f"{prefixo}_estoque", COLUNAS_VITAIS)
 df_hist = ler_da_nuvem(f"{prefixo}_historico_compras", ['data', 'produto', 'fornecedor', 'qtd', 'preco_pago', 'total_gasto', 'numero_nota', 'desconto_total_money', 'preco_sem_desconto'])
 df_mov = ler_da_nuvem(f"{prefixo}_movimentacoes", ['data_hora', 'produto', 'qtd_movida'])
 df_vendas = ler_da_nuvem(f"{prefixo}_vendas", ['data_hora', 'produto', 'qtd_vendida', 'estoque_restante'])
 df_lista_compras = ler_da_nuvem(f"{prefixo}_lista_compras", ['produto', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status'])
 df_oficial = ler_da_nuvem("base_oficial", ['nome do produto', 'código de barras'])
+
+if not df.empty:
+    df.columns = df.columns.str.strip().str.lower()
+    df['código de barras'] = df['código de barras'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+    df['nome do produto'] = df['nome do produto'].apply(lambda x: normalizar_texto(str(x)))
 
 st.sidebar.title("🏪 Menu")
 modo = st.sidebar.radio("Navegar:", ["📊 Dashboard (Visão Geral)", "🚚 Transferência em Massa (Picklist)", "📝 Lista de Compras (Planejamento)", "🆕 Cadastrar Produto", "📥 Importar XML (Associação Inteligente)", "⚙️ Configurar Base Oficial", "🔄 Sincronizar (Planograma)", "📉 Baixar Vendas (Do Relatório)", "🏠 Gôndola (Loja)", "🛒 Fornecedor (Compras)", "💰 Histórico & Preços", "🏡 Estoque Central (Casa)", "📋 Tabela Geral"])
@@ -227,22 +215,21 @@ if modo == "📊 Dashboard (Visão Geral)":
         df_critico = df_valido[(df_valido['validade'] <= hoje + timedelta(days=5)) & ((df_valido['qtd.estoque'] > 0) | (df_valido['qtd_central'] > 0))]
         valor_estoque = (df['qtd.estoque'] * df['preco_custo']).sum() + (df['qtd_central'] * df['preco_custo']).sum()
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("📦 Itens na Loja", int(df['qtd.estoque'].sum()))
-        c2.metric("💰 Valor Investido", f"R$ {valor_estoque:,.2f}")
-        c3.metric("🚨 Vencendo (5 dias)", len(df_critico))
+        c1.metric("📦 Loja", int(df['qtd.estoque'].sum()))
+        c2.metric("💰 Valor", f"R$ {valor_estoque:,.2f}")
+        c3.metric("🚨 Vencendo", len(df_critico))
         c4.metric("🏡 Casa", int(df['qtd_central'].sum()))
         if not df_critico.empty:
             st.error("🚨 Produtos Vencendo!"); st.dataframe(df_critico[['nome do produto', 'validade', 'qtd.estoque']])
 
 # ------------------------------------------------------------------
-# 2. GÔNDOLA (RESTAURADA TOTALMENTE)
+# 2. GÔNDOLA
 # ------------------------------------------------------------------
 elif modo == "🏠 Gôndola (Loja)":
     st.title(f"🏠 Gôndola - {loja_atual}")
     if df.empty: st.warning("Cadastre produtos.")
     else:
         if usar_modo_mobile:
-            st.info("📱 Modo Celular Ativado")
             termo = st.text_input("🔍 Buscar Produto:")
             df_show = filtrar_dados_inteligente(df, 'nome do produto', termo)
             for idx, row in df_show.iterrows():
@@ -272,7 +259,7 @@ elif modo == "🏠 Gôndola (Loja)":
                             c_dt, c_hr, c_qtd = st.columns(3)
                             dt_t = c_dt.date_input("Data:", datetime.today()); hr_t = c_hr.time_input("Hora:", datetime.now().time())
                             q_t = c_qtd.number_input(f"Qtd (Máx: {int(df.at[idx, 'qtd_central'])}):", min_value=0, max_value=int(df.at[idx, 'qtd_central']))
-                            if st.form_submit_button("⬇️ CONFIRMAR TRANSFERÊNCIA"):
+                            if st.form_submit_button("⬇️ CONFIRMAR"):
                                 if q_t > 0:
                                     df.at[idx, 'qtd.estoque'] += q_t; df.at[idx, 'qtd_central'] -= q_t
                                     salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
@@ -280,17 +267,19 @@ elif modo == "🏠 Gôndola (Loja)":
                                     novo_m = {'data_hora': datetime.combine(dt_t, hr_t), 'produto': nome_prod, 'qtd_movida': q_t}
                                     df_mov = pd.concat([df_mov, pd.DataFrame([novo_m])], ignore_index=True)
                                     salvar_na_nuvem(f"{prefixo}_movimentacoes", df_mov); st.success("Sucesso!"); st.rerun()
-                    with st.expander("🛠️ Ajustes Manuais (Completo)"):
+                    with st.expander("🛠️ Ajustes Manuais"):
                         cn = st.text_input("Nome:", value=nome_prod); cf = st.text_input("Fornecedor:", value=df.at[idx, 'ultimo_fornecedor'])
                         cc, cv = st.columns(2); n_c = cc.number_input("Custo:", value=float(df.at[idx, 'preco_custo']), format="%.2f"); n_v = cv.number_input("Venda:", value=float(df.at[idx, 'preco_venda']), format="%.2f")
                         if st.button("💾 SALVAR CORREÇÕES"):
                             df.at[idx, 'nome do produto'] = cn.upper(); df.at[idx, 'ultimo_fornecedor'] = cf; df.at[idx, 'preco_custo'] = n_c; df.at[idx, 'preco_venda'] = n_v
                             salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS); st.success("Salvo!"); st.rerun()
             with tab_hist:
-                df_m_s = filtrar_dados_inteligente(df_mov, 'produto', st.text_input("🔍 Filtrar Histórico:")); st.dataframe(df_m_s.sort_values(by='data_hora', ascending=False), use_container_width=True)
+                filtro_h = st.text_input("🔍 Filtrar Histórico:")
+                df_m_s = filtrar_dados_inteligente(df_mov, 'produto', filtro_h)
+                st.dataframe(df_m_s.sort_values(by='data_hora', ascending=False), use_container_width=True)
 
 # ------------------------------------------------------------------
-# 3. ESTOQUE CENTRAL (CORRIGIDO PARA NÃO DAR ERRO)
+# 3. ESTOQUE CENTRAL
 # ------------------------------------------------------------------
 elif modo == "🏡 Estoque Central (Casa)":
     st.title(f"🏡 Estoque Central (Casa) - {loja_atual}")
@@ -303,7 +292,6 @@ elif modo == "🏡 Estoque Central (Casa)":
             for i, r in df_e_c.iterrows(): atualizar_casa_global(df.at[i, 'nome do produto'], r['qtd_central'], r['preco_custo'], None, r['validade'], prefixo)
             st.success("Sincronizado!"); st.rerun()
     with tab_g:
-        st.info("Adicione mercadoria manualmente.")
         l_p = sorted(df['nome do produto'].unique().tolist()); p_o = st.selectbox("Produto:", l_p)
         if p_o:
             idx_p = df[df['nome do produto'] == p_o].index[0]
@@ -320,7 +308,7 @@ elif modo == "🏡 Estoque Central (Casa)":
                     st.success("Salvo!"); st.rerun()
 
 # ------------------------------------------------------------------
-# 4. TABELA GERAL (ESTABILIZADA)
+# 4. TABELA GERAL
 # ------------------------------------------------------------------
 elif modo == "📋 Tabela Geral":
     st.title("📋 Visão Geral (Editável)")
@@ -335,7 +323,7 @@ elif modo == "📋 Tabela Geral":
         df = unificar_produtos_por_codigo(df); salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS); st.success("Mágica feita!"); st.rerun()
 
 # ------------------------------------------------------------------
-# DEMAIS MÓDULOS (FUNCIONALIDADES ORIGINAIS MANTIDAS)
+# DEMAIS MÓDULOS (XML, SYNC, CADASTRO)
 # ------------------------------------------------------------------
 elif modo == "🆕 Cadastrar Produto":
     st.title("🆕 Cadastro")
@@ -347,7 +335,7 @@ elif modo == "🆕 Cadastrar Produto":
             df = pd.concat([df, pd.DataFrame([new])], ignore_index=True); salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS); st.success("Ok!"); st.rerun()
 
 elif modo == "📥 Importar XML (Associação Inteligente)":
-    st.title("📥 XML NFe (Suporte Híbrido)")
+    st.title("📥 XML NFe")
     arq = st.file_uploader("XML", type=['xml'])
     if arq:
         dados = ler_xml_nfe(arq, df_oficial); l_s = ["(CRIAR NOVO)"] + sorted(df['nome do produto'].unique().tolist()); escolhas = {}
@@ -390,3 +378,21 @@ elif modo == "🔄 Sincronizar (Planograma)":
                     new = {'código de barras': c, 'nome do produto': n, 'qtd.estoque': q, 'qtd_central': 0, 'qtd_minima': 5, 'preco_custo': 0, 'status_compra': 'OK'}
                     df = pd.concat([df, pd.DataFrame([new])], ignore_index=True)
             salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS); st.success("Sincronizado!"); st.rerun()
+
+elif modo == "⚙️ Configurar Base Oficial":
+    st.title("⚙️ Base Oficial")
+    ab = st.file_uploader("Suba o arquivo", type=['xlsx', 'csv'])
+    if ab:
+        if st.button("🚀 Processar"):
+            if processar_excel_oficial(ab): st.success("OK!"); st.rerun()
+
+elif modo == "📝 Lista de Compras (Planejamento)":
+    st.title("📝 Lista de Compras")
+    st.dataframe(df_lista_compras, use_container_width=True)
+    if st.button("🗑️ Limpar Lista"):
+        salvar_na_nuvem(f"{prefixo}_lista_compras", pd.DataFrame(columns=['produto', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status']))
+        st.rerun()
+
+elif modo == "💰 Histórico & Preços":
+    st.title("💰 Histórico")
+    st.dataframe(df_hist.sort_values(by='data', ascending=False), use_container_width=True)
