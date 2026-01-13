@@ -56,7 +56,8 @@ def converter_numero_seguro(valor):
     elif ',' in s_valor:
         s_valor = s_valor.replace(',', '.')
         
-    # Caso especial: se já está em formato ponto (ex: 3.19) -> Mantém
+    # Caso especial: se tem apenas ponto (ex: 3.19) -> Mantém como está
+    # O Python entende ponto como decimal nativamente.
     
     try:
         return float(s_valor)
@@ -194,8 +195,11 @@ def unificar_produtos_por_codigo(df):
 
 def processar_excel_oficial(arquivo_subido):
     try:
-        if arquivo_subido.name.endswith('.csv'): df_temp = pd.read_csv(arquivo_subido)
-        else: df_temp = pd.read_excel(arquivo_subido)
+        # CORREÇÃO: Força leitura como STRING para evitar que o Pandas "coma" o ponto decimal
+        if arquivo_subido.name.endswith('.csv'): 
+            df_temp = pd.read_csv(arquivo_subido, dtype=str)
+        else: 
+            df_temp = pd.read_excel(arquivo_subido, dtype=str)
         
         if 'obrigatório' in str(df_temp.iloc[0].values): df_temp = df_temp.iloc[1:].reset_index(drop=True)
         df_temp.columns = df_temp.columns.str.strip()
@@ -400,7 +404,8 @@ if df is not None:
         arquivo_pick = st.file_uploader("📂 Subir Picklist (.xlsx)", type=['xlsx', 'xls'])
         if arquivo_pick:
             try:
-                df_pick = pd.read_excel(arquivo_pick)
+                # CORREÇÃO: Lê como string para preservar pontuação
+                df_pick = pd.read_excel(arquivo_pick, dtype=str)
                 df_pick.columns = df_pick.columns.str.strip().str.lower()
                 col_barras = next((c for c in df_pick.columns if 'barras' in c), None)
                 col_qtd = next((c for c in df_pick.columns if 'transferir' in c), None)
@@ -662,8 +667,12 @@ if df is not None:
         arquivo = st.file_uploader("📂 Arquivo Planograma (XLSX ou CSV)", type=['xlsx', 'xls', 'csv'])
         if arquivo:
             try:
-                if arquivo.name.endswith('.csv'): df_raw = pd.read_csv(arquivo, header=None)
-                else: df_raw = pd.read_excel(arquivo, header=None)
+                # CORREÇÃO: Lê como STRING para evitar que o Pandas interprete errado
+                if arquivo.name.endswith('.csv'): 
+                    df_raw = pd.read_csv(arquivo, header=None, dtype=str)
+                else: 
+                    df_raw = pd.read_excel(arquivo, header=None, dtype=str)
+                
                 st.write("Identifique as colunas:")
                 st.dataframe(df_raw.head())
                 cols = df_raw.columns.tolist()
@@ -717,11 +726,12 @@ if df is not None:
             arquivo_vendas = st.file_uploader("📂 Relatório de Vendas", type=['xlsx', 'xls'], key="up_vendas")
             if arquivo_vendas:
                 try:
-                    df_bruto = pd.read_excel(arquivo_vendas, header=None)
+                    # CORREÇÃO: Lê como string
+                    df_bruto = pd.read_excel(arquivo_vendas, header=None, dtype=str)
                     st.dataframe(df_bruto.head(5), use_container_width=True)
                     linha_titulo = st.number_input("Número da linha dos TÍTULOS:", min_value=0, max_value=10, value=0)
                     arquivo_vendas.seek(0)
-                    df_vendas_temp = pd.read_excel(arquivo_vendas, header=linha_titulo)
+                    df_vendas_temp = pd.read_excel(arquivo_vendas, header=linha_titulo, dtype=str)
                     cols = df_vendas_temp.columns.tolist()
                     c1, c2, c3 = st.columns(3)
                     col_nome = c1.selectbox("Coluna NOME?", cols)
