@@ -13,8 +13,12 @@ import time
 # ==============================================================================
 st.set_page_config(page_title="Gestão Multi-Lojas", layout="wide", page_icon="🏪")
 
-# --- DEFINIÇÃO DE COLUNAS OBRIGATÓRIAS (PARA EVITAR KEYERROR) ---
-COLUNAS_VITAIS = ['código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central', 'qtd_minima', 'validade', 'status_compra', 'qtd_comprada', 'preco_custo', 'preco_venda', 'categoria', 'ultimo_fornecedor', 'preco_sem_desconto']
+# --- DEFINIÇÃO DAS COLUNAS (GLOBAL - PARA EVITAR ERROS) ---
+COLUNAS_VITAIS = [
+    'código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central', 
+    'qtd_minima', 'validade', 'status_compra', 'qtd_comprada', 
+    'preco_custo', 'preco_venda', 'categoria', 'ultimo_fornecedor', 'preco_sem_desconto'
+]
 COLS_HIST = ['data', 'produto', 'fornecedor', 'qtd', 'preco_pago', 'total_gasto', 'numero_nota', 'desconto_total_money', 'preco_sem_desconto']
 COLS_MOV = ['data_hora', 'produto', 'qtd_movida']
 COLS_VENDAS = ['data_hora', 'produto', 'qtd_vendida', 'estoque_restante']
@@ -30,17 +34,16 @@ def get_google_client():
     return gspread.authorize(creds)
 
 # --- FUNÇÃO DE CURA (CORRIGE O KEYERROR) ---
-def garantir_integridade_colunas(df, colunas_alvo):
-    if df.empty: return pd.DataFrame(columns=colunas_alvo)
+def garantir_integridade_colunas(df, colunas_referencia):
+    if df.empty: return pd.DataFrame(columns=colunas_referencia)
     df.columns = df.columns.str.strip().str.lower()
-    for col in colunas_alvo:
+    for col in colunas_referencia:
         if col not in df.columns:
             if any(x in col for x in ['qtd', 'preco', 'valor', 'custo', 'total']): df[col] = 0.0
-            elif 'data' in col or 'validade' in col: df[col] = None
             else: df[col] = ""
     return df
 
-# --- LEITURA DA NUVEM (COM CORREÇÃO DE VÍRGULA/PONTO) ---
+# --- LEITURA DA NUVEM (SUBSTITUI O READ_EXCEL) ---
 @st.cache_data(ttl=60)
 def ler_da_nuvem(nome_aba, colunas_padrao):
     time.sleep(1) # Pausa técnica
@@ -57,7 +60,7 @@ def ler_da_nuvem(nome_aba, colunas_padrao):
         df = garantir_integridade_colunas(df, colunas_padrao)
         for col in df.columns:
             c_low = col.lower()
-            if any(x in c_low for x in ['qtd', 'preco', 'valor', 'custo', 'total', 'desconto']):
+            if any(x in c_low for x in ['qtd', 'preco', 'valor', 'custo', 'total']):
                 # CORREÇÃO: Substitui vírgula por ponto antes de converter
                 if df[col].dtype == object:
                     df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
@@ -174,7 +177,7 @@ def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, n
                 if nova_validade is not None: df_outra.at[idx, 'validade'] = nova_validade
                 salvar_na_nuvem(f"{loja}_estoque", df_outra, COLUNAS_VITAIS)
 
-# --- FUNÇÃO XML HÍBRIDA (ADAPTADA) ---
+# --- FUNÇÃO XML HÍBRIDA (ADAPTADA PARA SEU FORMATO) ---
 def ler_xml_nfe(arquivo_xml, df_referencia):
     tree = ET.parse(arquivo_xml); root = tree.getroot()
     def tag_limpa(element): return element.tag.split('}')[-1]
@@ -259,7 +262,7 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
 st.sidebar.title("🏢 Seleção da Loja")
 loja_atual = st.sidebar.selectbox("Gerenciar qual unidade?", ["Loja 1 (Principal)", "Loja 2 (Filial)", "Loja 3 (Extra)"])
 st.sidebar.markdown("---")
-usar_modo_mobile = st.sidebar.checkbox("📱 Modo Celular (Cartões)", value=True, help="Melhora a visualização para iPhone/Android")
+usar_modo_mobile = st.sidebar.checkbox("📱 Modo Celular (Cartões)", value=False)
 st.sidebar.markdown("---")
 
 if loja_atual == "Loja 1 (Principal)": prefixo = "loja1"
@@ -357,7 +360,8 @@ if df is not None:
                 else: st.dataframe(df_lista_compras, use_container_width=True)
                 c_del, c_pdf = st.columns(2)
                 if c_del.button("🗑️ Limpar Lista Inteira (Após Comprar)"):
-                    salvar_na_nuvem(f"{prefixo}_lista_compras", pd.DataFrame(columns=['produto', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status']), COLS_LISTA); st.success("Lista limpa!"); st.rerun()
+                    salvar_na_nuvem(f"{prefixo}_lista_compras", pd.DataFrame(columns=COLS_LISTA), COLS_LISTA)
+                    st.success("Lista limpa!"); st.rerun()
             else: st.info("Sua lista de compras está vazia.")
         with tab_add:
             st.subheader("🤖 Gerador Automático")
@@ -394,7 +398,8 @@ if df is not None:
                         if mask.any(): preco_ref = df.loc[mask, 'preco_custo'].values[0]
                         novo_item = {'produto': prod_man, 'qtd_sugerida': qtd_man, 'fornecedor': obs_man, 'custo_previsto': preco_ref, 'data_inclusao': datetime.now().strftime("%d/%m/%Y"), 'status': 'Manual'}
                         df_lista_compras = pd.concat([df_lista_compras, pd.DataFrame([novo_item])], ignore_index=True)
-                        salvar_na_nuvem(f"{prefixo}_lista_compras", df_lista_compras, COLS_LISTA); st.success("Adicionado!"); st.rerun()
+                        salvar_na_nuvem(f"{prefixo}_lista_compras", df_lista_compras, COLS_LISTA)
+                        st.success("Adicionado!"); st.rerun()
                     else: st.error("Selecione um produto.")
 
     # 2. CADASTRAR PRODUTO
@@ -532,7 +537,7 @@ if df is not None:
                 opcoes_preco = ["(Não Atualizar Preço)"] + cols
                 idx_preco = c4.selectbox("Coluna PREÇO VENDA", opcoes_preco)
                 if st.button("🚀 SINCRONIZAR TUDO (Importar + Atualizar)"):
-                    df = ler_da_nuvem(f"{prefixo}_estoque", COLUNAS_VITAIS) # Recarrega
+                    df = ler_da_nuvem(f"{prefixo}_estoque", COLUNAS_VITAIS) # Recarrega para garantir
                     alt = 0; novos = 0; bar = st.progress(0); total_linhas = len(df_raw); novos_produtos = []
                     start_row = 1
                     for i in range(start_row, total_linhas):
@@ -702,10 +707,10 @@ if df is not None:
                                 salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
                                 st.success("Atualizado em todo o sistema!"); st.rerun()
                 with tab_hist:
-                    if not df_mov.empty and 'data_hora' in df_mov.columns:
+                    if not df_mov.empty:
                         busca_gondola_hist = st.text_input("🔍 Buscar no Histórico de Gôndola:", placeholder="Ex: oleo...", key="busca_gondola_hist")
                         df_mov_show = filtrar_dados_inteligente(df_mov, 'produto', busca_gondola_hist)
-                        if not df_mov_show.empty:
+                        if 'data_hora' in df_mov_show.columns:
                             st.dataframe(df_mov_show.sort_values(by='data_hora', ascending=False), use_container_width=True, hide_index=True)
                     else: st.info("Sem histórico registrado.")
 
@@ -734,7 +739,7 @@ if df is not None:
                         df.at[idx, 'preco_venda'] = venda
                         df.at[idx, 'status_compra'] = 'OK'
                         df.at[idx, 'qtd_comprada'] = 0
-                        df.at[idx, 'ultimo_fornecedor'] = forn_compra 
+                        df.at[idx, 'ultimo_fornecedor'] = forn_compra
                         salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
                         atualizar_casa_global(item, df.at[idx, 'qtd_central'], custo, venda, None, prefixo)
                         dt_full = datetime.combine(dt_compra, hr_compra)
@@ -752,18 +757,18 @@ if df is not None:
             df_hist_visual = df_hist
             if busca_hist_precos:
                 df_hist_visual = filtrar_dados_inteligente(df_hist, 'produto', busca_hist_precos)
-                if df_hist_visual.empty: 
+                if df_hist_visual.empty: 
                     df_hist_visual = filtrar_dados_inteligente(df_hist, 'fornecedor', busca_hist_precos)
             st.info("✅ Você pode editar ou **excluir** linhas (selecione a linha e aperte Delete).")
             df_editado = st.data_editor(
-                df_hist_visual.sort_values(by='data', ascending=False), 
-                use_container_width=True, 
-                key="editor_historico_geral", 
-                num_rows="dynamic", 
+                df_hist_visual.sort_values(by='data', ascending=False), 
+                use_container_width=True, 
+                key="editor_historico_geral", 
+                num_rows="dynamic", 
                 column_config={
-                    "preco_sem_desconto": st.column_config.NumberColumn("Preço Tabela", format="R$ %.2f"), 
-                    "desconto_total_money": st.column_config.NumberColumn("Desconto TOTAL", format="R$ %.2f"), 
-                    "preco_pago": st.column_config.NumberColumn("Pago (Unit)", format="R$ %.2f", disabled=True), 
+                    "preco_sem_desconto": st.column_config.NumberColumn("Preço Tabela", format="R$ %.2f"), 
+                    "desconto_total_money": st.column_config.NumberColumn("Desconto TOTAL", format="R$ %.2f"), 
+                    "preco_pago": st.column_config.NumberColumn("Pago (Unit)", format="R$ %.2f", disabled=True), 
                     "total_gasto": st.column_config.NumberColumn("Total Gasto", format="R$ %.2f", disabled=True)
                 }
             )
