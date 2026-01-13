@@ -33,6 +33,20 @@ def get_google_client():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(json_creds, scope)
     return gspread.authorize(creds)
 
+# --- FUNÇÃO DE CONVERSÃO DE VALORES PT-BR (CORREÇÃO PRINCIPAL) ---
+def converter_valor_ptbr(valor):
+    if pd.isna(valor) or str(valor).strip() == "":
+        return 0.0
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    s = str(valor).strip().replace("R$", "").replace("r$", "").strip()
+    s = s.replace('.', '')  # Remove pontos de milhar
+    s = s.replace(',', '.')  # Troca vírgula por ponto
+    try:
+        return float(s)
+    except:
+        return 0.0
+
 # --- FUNÇÃO DE CURA ---
 def garantir_integridade_colunas(df, colunas_alvo):
     if df.empty: return pd.DataFrame(columns=colunas_alvo)
@@ -44,10 +58,10 @@ def garantir_integridade_colunas(df, colunas_alvo):
             else: df[col] = ""
     return df
 
-# --- LEITURA DA NUVEM (CORREÇÃO DE PREÇOS V3 - DEFINITIVA) ---
+# --- LEITURA DA NUVEM (COM CORREÇÃO DE PREÇOS) ---
 @st.cache_data(ttl=60)
 def ler_da_nuvem(nome_aba, colunas_padrao):
-    time.sleep(1) # Pausa técnica
+    time.sleep(1)  # Pausa técnica
     try:
         client = get_google_client()
         sh = client.open("loja_dados")
@@ -56,23 +70,17 @@ def ler_da_nuvem(nome_aba, colunas_padrao):
             ws = sh.add_worksheet(title=nome_aba, rows=2000, cols=20)
             ws.append_row(colunas_padrao)
             return pd.DataFrame(columns=colunas_padrao)
-       
+        
         dados = ws.get_all_records()
         df = pd.DataFrame(dados)
         df = garantir_integridade_colunas(df, colunas_padrao)
-       
+        
         # CORREÇÃO DE VALORES (3,19 -> 3.19)
         for col in df.columns:
             c_low = col.lower()
-            # Se for coluna de número (preço, quantidade, valor)
             if any(x in c_low for x in ['qtd', 'preco', 'valor', 'custo', 'total', 'desconto']):
-                # Força converter para texto, troca vírgula por ponto, remove R$ e converte para float
-                df[col] = df[col].astype(str).str.replace('R$', '', regex=False).str.strip()
-                df[col] = df[col].str.replace('.', '', regex=False)  # Remove pontos de milhar
-                df[col] = df[col].str.replace(',', '.', regex=False)
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-           
-            # Se for data
+                df[col] = df[col].apply(converter_valor_ptbr)
+            
             if 'data' in c_low or 'validade' in c_low:
                 df[col] = pd.to_datetime(df[col], errors='coerce')
         return df
@@ -85,14 +93,14 @@ def salvar_na_nuvem(nome_aba, df, colunas_padrao):
         sh = client.open("loja_dados")
         try: ws = sh.worksheet(nome_aba)
         except: ws = sh.add_worksheet(title=nome_aba, rows=2000, cols=20)
-       
+        
         ws.clear()
         df_save = garantir_integridade_colunas(df.copy(), colunas_padrao)
-       
+        
         for col in df_save.columns:
             if pd.api.types.is_datetime64_any_dtype(df_save[col]):
                 df_save[col] = df_save[col].astype(str).replace('NaT', '')
-               
+                
         ws.update([df_save.columns.values.tolist()] + df_save.values.tolist())
         ler_da_nuvem.clear()
     except Exception as e: st.error(f"Erro ao salvar: {e}")
@@ -138,7 +146,8 @@ def unificar_produtos_por_codigo(df):
     df = garantir_integridade_colunas(df, COLUNAS_VITAIS)
     cols_num = ['qtd.estoque', 'qtd_central', 'qtd_minima', 'qtd_comprada', 'preco_custo', 'preco_venda', 'preco_sem_desconto']
     for col in cols_num:
-        if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        if col in df.columns: 
+            df[col] = df[col].apply(converter_valor_ptbr)
     lista_final = []
     df['código de barras'] = df['código de barras'].astype(str).str.strip()
     sem_codigo = df[df['código de barras'] == ""]
