@@ -8,10 +8,13 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 import time
 import re
-import locale
 
-# Configura o locale para pt_BR para lidar com vírgulas em decimais
-locale.setlocale(locale.LC_ALL, 'pt_BR.UTF-8')
+# Removido locale.setlocale para evitar erro em ambientes sem suporte a 'pt_BR.UTF-8'
+
+# Função para formatar números no estilo brasileiro (milhar '.', decimal ',')
+def format_br(valor):
+    s = f"{valor:,.2f}"  # Formata com , para milhar e . para decimal
+    return s.replace(',', 'X').replace('.', ',').replace('X', '.')
 
 # ==============================================================================
 # ⚙️ CONFIGURAÇÃO DE NUVEM & SISTEMA
@@ -349,7 +352,7 @@ if df is not None:
            
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("📦 Itens na Loja", int(df['qtd.estoque'].sum()))
-            c2.metric("💰 Valor Investido", f"R$ {valor_estoque:,.2f}")
+            c2.metric("💰 Valor Investido", f"R$ {format_br(valor_estoque)}")
             c3.metric("🚨 Vencendo (5 dias)", len(df_critico))
             c4.metric("⚠️ Atenção (10 dias)", len(df_atencao))
             st.divider()
@@ -523,7 +526,7 @@ if df is not None:
                     with c1:
                         st.markdown(f"📄 XML: **{nome_xml}**")
                         st.caption(f"EAN XML: `{ean_xml}` | Qtd: {int(qtd_xml)}")
-                        st.markdown(f"💰 Tabela: R$ {p_bruto:.2f} | **Pago (Desc): R$ {p_liq:.2f}**")
+                        st.markdown(f"💰 Tabela: R$ {format_br(p_bruto)} | **Pago (Desc): R$ {format_br(p_liq)}**")
                     with c2:
                         idx_inicial = lista_produtos_sistema.index(str(match_inicial)) if str(match_inicial) in lista_produtos_sistema else 0
                         escolha_usuario = st.selectbox(f"Vincular ao Sistema ({tipo_match}):", lista_produtos_sistema, index=idx_inicial, key=f"sel_{i}")
