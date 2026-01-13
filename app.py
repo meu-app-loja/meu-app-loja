@@ -933,17 +933,17 @@ if df is not None:
                 salvar_na_nuvem(f"{prefixo}_historico_compras", df_hist, COLS_HIST)
                 st.success("Histórico salvo com sucesso!"); st.rerun()
             
-            # --- ÁREA DE SINCRONIZAÇÃO (OTIMIZADA PARA NÃO TRAVAR O GOOGLE) ---
+            # --- ÁREA DE SINCRONIZAÇÃO (OTIMIZADA E COMPLETA) ---
             st.markdown("---")
             with st.container(border=True):
                 st.subheader("🛠️ ÁREA DE SINCRONIZAÇÃO GERAL")
-                st.info("⚠️ **Atenção:** Isso sincronizará os preços de todas as lojas com base no histórico. O processo foi otimizado para evitar erros.")
+                st.info("⚠️ **Atenção:** Isso sincronizará o sistema inteiro. O PREÇO e FORNECEDOR serão puxados do Histórico. A QUANTIDADE da Casa (Estoque Central) será unificada em todas as lojas.")
                 
-                if st.button("🔄 CLIQUE AQUI PARA ATUALIZAR TODO O SISTEMA COM ESTES PREÇOS", use_container_width=True, type="primary"):
+                if st.button("🔄 CLIQUE AQUI PARA ATUALIZAR TODO O SISTEMA COM ESTES DADOS", use_container_width=True, type="primary"):
                     if df.empty: st.warning("Tabela de estoque vazia.")
                     else:
                         with st.spinner("⏳ Conectando às lojas e baixando dados..."):
-                            # 1. Carrega dados de TODAS as lojas de uma vez para não travar o API
+                            # 1. Carrega dados de TODAS as lojas de uma vez
                             lojas_data = {}
                             todas_lojas = ["loja1", "loja2", "loja3"]
                             client = get_google_client()
@@ -959,35 +959,57 @@ if df is not None:
                                         lojas_data[loja_x] = d_x
                                 except: pass
                         
-                        # 2. Prepara Mapa de Preços do Histórico
-                        mapa_precos = {} # { "NOME PRODUTO": {custo: 10.0, forn: "ABC"} }
+                        # 2. MAPA DE PREÇOS (HISTÓRICO)
+                        mapa_historico = {} 
                         df_hist_sorted = df_hist.sort_values(by='data', ascending=True)
                         for _, row in df_hist_sorted.iterrows():
                             nm = str(row['produto']).strip()
                             pr = converter_numero_seguro(row['preco_pago'])
                             forn = str(row['fornecedor'])
-                            if pr > 0: mapa_precos[nm] = {'custo': pr, 'forn': forn}
+                            if pr > 0: mapa_historico[nm] = {'custo': pr, 'forn': forn}
                         
+                        # 3. MAPA DE QUANTIDADE CENTRAL (DA LOJA ATUAL - MASTER)
+                        mapa_estoque_mestre = {}
+                        for _, row in df.iterrows():
+                            nm = str(row['nome do produto']).strip()
+                            qtd_c = converter_numero_seguro(row['qtd_central'])
+                            mapa_estoque_mestre[nm] = qtd_c
+
                         count = 0
                         with st.status("🛠️ Aplicando correções em memória...", expanded=True) as status:
-                            # 3. Aplica correções em memória (Rápido)
+                            # 4. Aplica correções em memória
                             for loja_nome, df_loja in lojas_data.items():
                                 status.write(f"Processando {loja_nome}...")
                                 alterou = False
-                                for nome_prod, dados_novos in mapa_precos.items():
-                                    mask = df_loja['nome do produto'].astype(str) == nome_prod
-                                    if mask.any():
-                                        idx = df_loja[mask].index[0]
-                                        # Verifica se precisa mudar para não salvar à toa
-                                        atual_custo = converter_numero_seguro(df_loja.at[idx, 'preco_custo'])
-                                        novo_custo = dados_novos['custo']
-                                        if abs(atual_custo - novo_custo) > 0.001 or str(df_loja.at[idx, 'ultimo_fornecedor']) != dados_novos['forn']:
+                                for idx, row in df_loja.iterrows():
+                                    nome_prod = str(row['nome do produto']).strip()
+                                    
+                                    # A. Sincroniza Preço e Fornecedor do Histórico
+                                    if nome_prod in mapa_historico:
+                                        dados_hist = mapa_historico[nome_prod]
+                                        novo_custo = dados_hist['custo']
+                                        novo_forn = dados_hist['forn']
+                                        
+                                        atual_custo = converter_numero_seguro(row['preco_custo'])
+                                        atual_forn = str(row['ultimo_fornecedor'])
+                                        
+                                        if abs(atual_custo - novo_custo) > 0.001 or atual_forn != novo_forn:
                                             df_loja.at[idx, 'preco_custo'] = novo_custo
-                                            df_loja.at[idx, 'ultimo_fornecedor'] = dados_novos['forn']
+                                            df_loja.at[idx, 'ultimo_fornecedor'] = novo_forn
                                             alterou = True
-                                            count += 1
+                                    
+                                    # B. Sincroniza Quantidade Central (Casa) do Mestre
+                                    if nome_prod in mapa_estoque_mestre:
+                                        nova_qtd_casa = mapa_estoque_mestre[nome_prod]
+                                        atual_qtd_casa = converter_numero_seguro(row['qtd_central'])
+                                        
+                                        if abs(atual_qtd_casa - nova_qtd_casa) > 0.001:
+                                            df_loja.at[idx, 'qtd_central'] = nova_qtd_casa
+                                            alterou = True
+
+                                if alterou: count += 1
                                 
-                                # 4. Salva de volta no Google (Apenas 1 chamada por loja)
+                                # 5. Salva de volta no Google
                                 if alterou:
                                     status.write(f"💾 Salvando alterações em {loja_nome}...")
                                     try:
@@ -1005,7 +1027,7 @@ if df is not None:
                             
                             status.update(label="✅ Finalizado!", state="complete", expanded=False)
                         
-                        st.success(f"✅ Sincronizado com Sucesso! O sistema foi atualizado sem erros.")
+                        st.success(f"✅ Sincronizado com Sucesso! Preços, Fornecedores e Estoque da Casa foram unificados.")
                         time.sleep(2)
                         st.rerun()
 
