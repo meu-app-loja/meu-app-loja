@@ -967,5 +967,4 @@ if df is not None:
                     cols_num = ['qtd.estoque', 'qtd_central', 'qtd_minima', 'qtd_comprada', 'preco_custo', 'preco_venda', 'preco_sem_desconto']
                     df = corrigir_valores_inflados(df, cols_num)
                     salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
-                    st.success("Valores inflados corrigidos (ex: 319.00 -> 3.19). Verifique e salve novamente se necessário!"); st.rerun()
-```()
+                    st.success("Valores inflados corrigidos (ex: 319.00 -> 3.19). Verifique e salve novamente se necessário!"); st.rerun() Pago
