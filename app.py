@@ -33,28 +33,17 @@ def get_google_client():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(json_creds, scope)
     return gspread.authorize(creds)
 
-# --- FUNÇÃO DE LIMPEZA MATEMÁTICA ABSOLUTA V3 ---
+# --- FUNÇÃO DE LIMPEZA MATEMÁTICA ---
 def converter_numero_seguro(valor):
-    """
-    Converte qualquer formato (3.19 ou 3,19 ou R$ 3,19) para o número correto 3.19
-    """
     if pd.isna(valor) or str(valor).strip() == "": return 0.0
-    
-    # Remove R$ e espaços
     s_valor = str(valor).strip().replace('R$', '').replace('r$', '').strip()
-    
     try:
-        # Se tem ponto e vírgula (Ex: 1.200,50) -> Padrão BR com milhar
         if '.' in s_valor and ',' in s_valor:
             s_valor = s_valor.replace('.', '').replace(',', '.')
-        # Se tem apenas vírgula (Ex: 3,19) -> Padrão BR simples
         elif ',' in s_valor:
             s_valor = s_valor.replace(',', '.')
-        # Se tem apenas ponto (Ex: 3.19) -> Padrão US (já está certo)
-        
         return float(s_valor)
-    except:
-        return 0.0
+    except: return 0.0
 
 # --- FUNÇÃO DE CURA ---
 def garantir_integridade_colunas(df, colunas_alvo):
@@ -67,10 +56,10 @@ def garantir_integridade_colunas(df, colunas_alvo):
             else: df[col] = ""
     return df
 
-# --- LEITURA DA NUVEM (COM RETRY AUTOMÁTICO) ---
+# --- LEITURA DA NUVEM (COM RETRY) ---
 @st.cache_data(ttl=60)
 def ler_da_nuvem(nome_aba, colunas_padrao):
-    time.sleep(0.5)
+    time.sleep(0.5) 
     max_tentativas = 3
     for tentativa in range(max_tentativas):
         try:
@@ -93,7 +82,6 @@ def ler_da_nuvem(nome_aba, colunas_padrao):
                 if 'data' in c_low or 'validade' in c_low:
                     df[col] = pd.to_datetime(df[col], errors='coerce')
             return df
-        
         except Exception as e:
             if "429" in str(e) or "Quota" in str(e):
                 time.sleep(2 * (tentativa + 1))
@@ -101,7 +89,7 @@ def ler_da_nuvem(nome_aba, colunas_padrao):
                 return pd.DataFrame(columns=colunas_padrao)
     return pd.DataFrame(columns=colunas_padrao)
 
-# --- SALVAR NA NUVEM (COM RETRY AUTOMÁTICO) ---
+# --- SALVAR NA NUVEM (COM RETRY) ---
 def salvar_na_nuvem(nome_aba, df, colunas_padrao):
     max_tentativas = 3
     for tentativa in range(max_tentativas):
@@ -113,7 +101,6 @@ def salvar_na_nuvem(nome_aba, df, colunas_padrao):
             
             ws.clear()
             df_save = garantir_integridade_colunas(df.copy(), colunas_padrao)
-            
             for col in df_save.columns:
                 c_low = col.lower()
                 if any(x in c_low for x in ['qtd', 'preco', 'valor', 'custo', 'total', 'desconto']):
@@ -164,7 +151,7 @@ def encontrar_melhor_match(nome_buscado, lista_opcoes, cutoff=0.3):
         if opcao == "(CRIAR NOVO)": continue
         score = calcular_pontuacao(nome_buscado, opcao)
         if score > maior_score: maior_score = score; melhor_match = opcao
-    if maior_score >= cutoff: return melhor_match, "Nome Similar (Palavras)"
+    if maior_score >= cutoff: return melhor_match, "Nome Similar"
     return None, "Nenhum"
 
 def unificar_produtos_por_codigo(df):
@@ -193,7 +180,6 @@ def unificar_produtos_por_codigo(df):
 
 def processar_excel_oficial(arquivo_subido):
     try:
-        # CORREÇÃO: dtype=str para não perder pontuação (3.19)
         if arquivo_subido.name.endswith('.csv'): df_temp = pd.read_csv(arquivo_subido, dtype=str)
         else: df_temp = pd.read_excel(arquivo_subido, dtype=str)
         
@@ -213,10 +199,9 @@ def processar_excel_oficial(arquivo_subido):
         st.error(f"Erro: {e}")
         return False
 
-# --- FUNÇÃO ATUALIZAR CASA GLOBAL (COM PAUSA DE SEGURANÇA) ---
+# --- ATUALIZAR CASA GLOBAL (COM PAUSA) ---
 def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, nova_validade, prefixo_ignorar):
     todas_lojas = ["loja1", "loja2", "loja3"]
-    # PAUSA CRÍTICA PARA NÃO DAR ERRO DE API 429
     time.sleep(1.5)
     
     for loja in todas_lojas:
@@ -246,7 +231,7 @@ def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, n
                     ws.update([df_outra.columns.values.tolist()] + df_outra.values.tolist())
         except: pass 
 
-# --- FUNÇÃO XML HÍBRIDA (MANTIDA ORIGINAL COM ASSOCIAÇÃO) ---
+# --- FUNÇÃO XML HÍBRIDA (VISUAL RESTAURADO) ---
 def ler_xml_nfe(arquivo_xml, df_referencia):
     tree = ET.parse(arquivo_xml); root = tree.getroot()
     def tag_limpa(element): return element.tag.split('}')[-1]
@@ -311,8 +296,10 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
     
     for item in dados_nota['itens']:
         if item['ean'] in ['SEM GTIN', '', 'None', 'NAN'] and lista_nomes_ref:
-            melhor, _ = encontrar_melhor_match(item['nome'], lista_nomes_ref)
-            if melhor: item['ean'] = dict_ref_ean.get(melhor, item['ean'])
+            melhor, tipo = encontrar_melhor_match(item['nome'], lista_nomes_ref) # AQUI ESTÁ A CORREÇÃO
+            if melhor: 
+                item['ean'] = dict_ref_ean.get(melhor, item['ean'])
+                item['match_tipo'] = tipo # Guardando o tipo para mostrar no visual
     return dados_nota
 
 # ==============================================================================
@@ -354,14 +341,16 @@ if df is not None:
             df_critico = df_valido[(df_valido['validade'] <= hoje + timedelta(days=5)) & ((df_valido['qtd.estoque'] > 0) | (df_valido['qtd_central'] > 0))]
             df_atencao = df_valido[(df_valido['validade'] > hoje + timedelta(days=5)) & (df_valido['validade'] <= hoje + timedelta(days=10))]
             valor_estoque = (df['qtd.estoque'] * df['preco_custo']).sum() + (df['qtd_central'] * df['preco_custo']).sum()
+            
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("📦 Itens na Loja", int(df['qtd.estoque'].sum()))
             c2.metric("💰 Valor Investido", f"R$ {valor_estoque:,.2f}")
             c3.metric("🚨 Vencendo (5 dias)", len(df_critico))
             c4.metric("⚠️ Atenção (10 dias)", len(df_atencao))
             st.divider()
+            
             baixo_estoque = df[(df['qtd.estoque'] + df['qtd_central']) <= df['qtd_minima']]
-            if not baixo_estoque.empty: st.warning(f"🚨 Existem {len(baixo_estoque)} produtos com estoque baixo!")
+            if not baixo_estoque.empty: st.warning(f"🚨 Existem {len(baixo_estoque)} produtos com estoque baixo! Vá em 'Lista de Compras' para ver.")
             if not df_critico.empty: st.error("🚨 Produtos Vencendo!"); st.dataframe(df_critico[['nome do produto', 'validade', 'qtd.estoque']])
             
     # 1.5 PICKLIST
@@ -370,7 +359,6 @@ if df is not None:
         arquivo_pick = st.file_uploader("📂 Subir Picklist (.xlsx)", type=['xlsx', 'xls'])
         if arquivo_pick:
             try:
-                # CORREÇÃO: dtype=str para ler corretamente
                 df_pick = pd.read_excel(arquivo_pick, dtype=str)
                 df_pick.columns = df_pick.columns.str.strip().str.lower()
                 col_barras = next((c for c in df_pick.columns if 'barras' in c), None)
@@ -420,11 +408,11 @@ if df is not None:
         with tab_add:
             st.subheader("🤖 Gerador Automático")
             if st.button("🚀 Gerar Lista Baseada no Estoque Baixo"):
-                if df.empty: st.warning("Sem produtos.")
+                if df.empty: st.warning("Sem produtos cadastrados.")
                 else:
                     mask_baixo = (df['qtd.estoque'] + df['qtd_central']) <= df['qtd_minima']
                     produtos_baixo = df[mask_baixo]
-                    if produtos_baixo.empty: st.success("Tudo certo!")
+                    if produtos_baixo.empty: st.success("Tudo certo! Nada abaixo do mínimo.")
                     else:
                         novos_itens = []
                         for _, row in produtos_baixo.iterrows():
@@ -483,26 +471,35 @@ if df is not None:
         if arquivo_xml:
             try:
                 dados = ler_xml_nfe(arquivo_xml, df_oficial)
-                st.success(f"Nota: {dados['numero']} | Fornecedor: {dados['fornecedor']}")
-                st.markdown("---")
+                st.success(f"Nota Fiscal: **{dados['numero']}** | Fornecedor: **{dados['fornecedor']}**")
+                st.markdown("---"); st.subheader("🛠️ Conferência e Cálculo de Descontos")
+                
                 lista_produtos_sistema = ["(CRIAR NOVO)"] + sorted(df['nome do produto'].astype(str).unique().tolist())
                 escolhas = {}
+                
                 for i, item in enumerate(dados['itens']):
                     c1, c2 = st.columns([1, 1])
                     with c1:
                         st.markdown(f"**{item['nome']}**")
                         st.caption(f"Qtd: {int(item['qtd'])} | R$ {item['preco_un_liquido']:.2f}")
                     with c2:
-                        match_inicial = "(CRIAR NOVO)"
+                        match_inicial = "(CRIAR NOVO)"; tipo_match = "Nenhum"
                         if not df.empty:
                             mask_ean = df['código de barras'].astype(str) == item['ean']
-                            if mask_ean.any(): match_inicial = df.loc[mask_ean, 'nome do produto'].values[0]
+                            if mask_ean.any():
+                                match_inicial = df.loc[mask_ean, 'nome do produto'].values[0]
+                                tipo_match = "Código de Barras"
                             else:
-                                mel, _ = encontrar_melhor_match(item['nome'], df['nome do produto'].astype(str).tolist())
-                                if mel: match_inicial = mel
+                                mel, tipo_encontrado = encontrar_melhor_match(item['nome'], df['nome do produto'].astype(str).tolist())
+                                if mel: 
+                                    match_inicial = mel
+                                    tipo_match = tipo_encontrado
+                        
                         idx_inicial = lista_produtos_sistema.index(str(match_inicial)) if str(match_inicial) in lista_produtos_sistema else 0
-                        escolhas[i] = st.selectbox(f"Vincular:", lista_produtos_sistema, index=idx_inicial, key=f"sel_{i}")
+                        # AQUI ESTÁ A CORREÇÃO VISUAL QUE FALTAVA
+                        escolhas[i] = st.selectbox(f"Vincular ({tipo_match}):", lista_produtos_sistema, index=idx_inicial, key=f"sel_{i}")
                     st.divider()
+                    
                 if st.button("✅ CONFIRMAR E SALVAR ESTOQUE"):
                     novos_hist = []; criados_cont = 0; atualizados_cont = 0
                     for i, item in enumerate(dados['itens']):
@@ -522,7 +519,7 @@ if df is not None:
                                 atualizados_cont += 1
                                 nm_final = prod_esc; qtd_final = df.at[idx, 'qtd_central']
                         
-                        # CORREÇÃO: Try/Except para evitar travamento
+                        # PROTEÇÃO DE ERRO NO LOOP
                         try:
                             atualizar_casa_global(nm_final, qtd_final, preco, None, None, prefixo)
                         except: pass
@@ -533,7 +530,7 @@ if df is not None:
                     if novos_hist:
                         df_hist = pd.concat([df_hist, pd.DataFrame(novos_hist)], ignore_index=True)
                         salvar_na_nuvem(f"{prefixo}_historico_compras", df_hist, COLS_HIST)
-                    ler_da_nuvem.clear() # Limpa cache para Gondola atualizar
+                    ler_da_nuvem.clear() # LIMPA O CACHE PARA GÔNDOLA ATUALIZAR
                     st.success(f"Sucesso! {criados_cont} novos, {atualizados_cont} atualizados."); time.sleep(2); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
     
@@ -561,7 +558,7 @@ if df is not None:
         arquivo = st.file_uploader("📂 Arquivo Planograma (XLSX ou CSV)", type=['xlsx', 'xls', 'csv'])
         if arquivo:
             try:
-                # CORREÇÃO: dtype=str para ler numeros como 3.19 corretamente
+                # CORREÇÃO: Lê como string (dtype=str)
                 if arquivo.name.endswith('.csv'): df_raw = pd.read_csv(arquivo, header=None, dtype=str)
                 else: df_raw = pd.read_excel(arquivo, header=None, dtype=str)
                 st.write("Identifique as colunas:")
