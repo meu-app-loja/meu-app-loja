@@ -9,11 +9,10 @@ import json
 import time
 
 # ==============================================================================
-# ⚙️ CONFIGURAÇÃO DE NUVEM (ADAPTADOR TRANSPARENTE)
+# ⚙️ CONFIGURAÇÃO DE NUVEM
 # ==============================================================================
 st.set_page_config(page_title="Gestão Multi-Lojas", layout="wide", page_icon="🏪")
 
-# --- DEFINIÇÃO DE COLUNAS OBRIGATÓRIAS (GLOBAL) ---
 COLUNAS_VITAIS = [
     'código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central',
     'qtd_minima', 'validade', 'status_compra', 'qtd_comprada',
@@ -25,7 +24,6 @@ COLS_VENDAS = ['data_hora', 'produto', 'qtd_vendida', 'estoque_restante']
 COLS_LISTA = ['produto', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status']
 COLS_OFICIAL = ['nome do produto', 'código de barras']
 
-# --- CONEXÃO SEGURA ---
 @st.cache_resource
 def get_google_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -33,19 +31,16 @@ def get_google_client():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(json_creds, scope)
     return gspread.authorize(creds)
 
-# --- FUNÇÃO DE LIMPEZA MATEMÁTICA ABSOLUTA ---
+# --- FUNÇÃO DE LIMPEZA MATEMÁTICA ---
 def converter_numero_seguro(valor):
     if pd.isna(valor) or str(valor).strip() == "": return 0.0
     s_valor = str(valor).strip().replace('R$', '').replace('r$', '').strip()
     try:
-        if '.' in s_valor and ',' in s_valor:
-            s_valor = s_valor.replace('.', '').replace(',', '.')
-        elif ',' in s_valor:
-            s_valor = s_valor.replace(',', '.')
+        if '.' in s_valor and ',' in s_valor: s_valor = s_valor.replace('.', '').replace(',', '.')
+        elif ',' in s_valor: s_valor = s_valor.replace(',', '.')
         return float(s_valor)
     except: return 0.0
 
-# --- FUNÇÃO DE CURA ---
 def garantir_integridade_colunas(df, colunas_alvo):
     if df.empty: return pd.DataFrame(columns=colunas_alvo)
     df.columns = df.columns.str.strip().str.lower()
@@ -56,10 +51,9 @@ def garantir_integridade_colunas(df, colunas_alvo):
             else: df[col] = ""
     return df
 
-# --- LEITURA DA NUVEM (COM RETRY) ---
 @st.cache_data(ttl=60)
 def ler_da_nuvem(nome_aba, colunas_padrao):
-    time.sleep(0.5) 
+    time.sleep(0.5)
     max_tentativas = 3
     for tentativa in range(max_tentativas):
         try:
@@ -70,11 +64,9 @@ def ler_da_nuvem(nome_aba, colunas_padrao):
                 ws = sh.add_worksheet(title=nome_aba, rows=2000, cols=20)
                 ws.append_row(colunas_padrao)
                 return pd.DataFrame(columns=colunas_padrao)
-            
             dados = ws.get_all_records()
             df = pd.DataFrame(dados)
             df = garantir_integridade_colunas(df, colunas_padrao)
-            
             for col in df.columns:
                 c_low = col.lower()
                 if any(x in c_low for x in ['qtd', 'preco', 'valor', 'custo', 'total', 'desconto']):
@@ -83,13 +75,10 @@ def ler_da_nuvem(nome_aba, colunas_padrao):
                     df[col] = pd.to_datetime(df[col], errors='coerce')
             return df
         except Exception as e:
-            if "429" in str(e) or "Quota" in str(e):
-                time.sleep(2 * (tentativa + 1))
-            else:
-                return pd.DataFrame(columns=colunas_padrao)
+            if "429" in str(e) or "Quota" in str(e): time.sleep(2 * (tentativa + 1))
+            else: return pd.DataFrame(columns=colunas_padrao)
     return pd.DataFrame(columns=colunas_padrao)
 
-# --- SALVAR NA NUVEM (COM RETRY) ---
 def salvar_na_nuvem(nome_aba, df, colunas_padrao):
     max_tentativas = 3
     for tentativa in range(max_tentativas):
@@ -98,7 +87,6 @@ def salvar_na_nuvem(nome_aba, df, colunas_padrao):
             sh = client.open("loja_dados")
             try: ws = sh.worksheet(nome_aba)
             except: ws = sh.add_worksheet(title=nome_aba, rows=2000, cols=20)
-            
             ws.clear()
             df_save = garantir_integridade_colunas(df.copy(), colunas_padrao)
             for col in df_save.columns:
@@ -107,16 +95,12 @@ def salvar_na_nuvem(nome_aba, df, colunas_padrao):
                      df_save[col] = df_save[col].apply(converter_numero_seguro)
                 if pd.api.types.is_datetime64_any_dtype(df_save[col]):
                     df_save[col] = df_save[col].astype(str).replace('NaT', '')
-            
             ws.update([df_save.columns.values.tolist()] + df_save.values.tolist())
             ler_da_nuvem.clear()
-            return 
+            return
         except Exception as e:
-            if "429" in str(e) or "Quota" in str(e):
-                time.sleep(3 * (tentativa + 1))
-            else:
-                st.error(f"Erro ao salvar: {e}")
-                break
+            if "429" in str(e) or "Quota" in str(e): time.sleep(3 * (tentativa + 1))
+            else: st.error(f"Erro ao salvar: {e}"); break
 
 # ==============================================================================
 # 🧠 FUNÇÕES AUXILIARES
@@ -182,60 +166,46 @@ def processar_excel_oficial(arquivo_subido):
     try:
         if arquivo_subido.name.endswith('.csv'): df_temp = pd.read_csv(arquivo_subido, dtype=str)
         else: df_temp = pd.read_excel(arquivo_subido, dtype=str)
-        
         if 'obrigatório' in str(df_temp.iloc[0].values): df_temp = df_temp.iloc[1:].reset_index(drop=True)
         df_temp.columns = df_temp.columns.str.strip()
         col_nome = next((c for c in df_temp.columns if 'nome' in c.lower()), 'Nome')
         col_cod = next((c for c in df_temp.columns if 'código' in c.lower() or 'barras' in c.lower()), 'Código de Barras Primário')
-        
         df_limpo = df_temp[[col_nome, col_cod]].copy()
         df_limpo.columns = ['nome do produto', 'código de barras']
         df_limpo['nome do produto'] = df_limpo['nome do produto'].apply(normalizar_texto)
         df_limpo['código de barras'] = df_limpo['código de barras'].astype(str).str.replace('.0', '', regex=False).str.strip()
-        
         salvar_na_nuvem("base_oficial", df_limpo, COLS_OFICIAL)
         return True
-    except Exception as e:
-        st.error(f"Erro: {e}")
-        return False
+    except Exception as e: st.error(f"Erro: {e}"); return False
 
-# --- ATUALIZAR CASA GLOBAL (COM PAUSA SEGURA) ---
 def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, nova_validade, prefixo_ignorar):
     todas_lojas = ["loja1", "loja2", "loja3"]
     time.sleep(1.5)
-    
     for loja in todas_lojas:
         if loja == prefixo_ignorar: continue
         try:
             client = get_google_client()
             sh = client.open("loja_dados")
-            ws_nome = f"{loja}_estoque"
-            try: ws = sh.worksheet(ws_nome)
+            try: ws = sh.worksheet(f"{loja}_estoque")
             except: continue
-            
             dados = ws.get_all_records()
             df_outra = pd.DataFrame(dados)
             if not df_outra.empty:
                 df_outra = garantir_integridade_colunas(df_outra, COLUNAS_VITAIS)
                 df_outra.columns = df_outra.columns.str.strip().str.lower()
                 mask = df_outra['nome do produto'].astype(str) == str(nome_produto)
-                
                 if mask.any():
                     idx = df_outra[mask].index[0]
                     if qtd_nova_casa is not None: df_outra.at[idx, 'qtd_central'] = converter_numero_seguro(qtd_nova_casa)
                     if novo_custo is not None: df_outra.at[idx, 'preco_custo'] = converter_numero_seguro(novo_custo)
                     if novo_venda is not None: df_outra.at[idx, 'preco_venda'] = converter_numero_seguro(novo_venda)
-                    if nova_validade is not None: 
-                        df_outra.at[idx, 'validade'] = str(nova_validade).replace('NaT', '')
-                    
+                    if nova_validade is not None: df_outra.at[idx, 'validade'] = str(nova_validade).replace('NaT', '')
                     ws.update([df_outra.columns.values.tolist()] + df_outra.values.tolist())
         except: pass 
 
-# --- FUNÇÃO XML HÍBRIDA (VISUAL COMPLETO + MATCH) ---
 def ler_xml_nfe(arquivo_xml, df_referencia):
     tree = ET.parse(arquivo_xml); root = tree.getroot()
     def tag_limpa(element): return element.tag.split('}')[-1]
-    
     info_custom = root.find("Info")
     if info_custom is not None:
         try:
@@ -255,10 +225,8 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
     if itens_custom:
         for it in itens_custom:
             try:
-                nome = it.find("Nome").text
-                qtd = converter_numero_seguro(it.find("Quantidade").text)
-                valor = converter_numero_seguro(it.find("ValorPagoFinal").text)
-                ean = it.find("CodigoBarras").text
+                nome = it.find("Nome").text; qtd = converter_numero_seguro(it.find("Quantidade").text)
+                valor = converter_numero_seguro(it.find("ValorPagoFinal").text); ean = it.find("CodigoBarras").text
                 desc = 0.0
                 if it.find("ValorDesconto") is not None: desc = converter_numero_seguro(it.find("ValorDesconto").text)
                 p_liq = valor / qtd if qtd > 0 else 0; p_bruto = (valor + desc) / qtd if qtd > 0 else 0
@@ -287,7 +255,6 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
                     dados_nota['itens'].append(item)
             except: continue
             
-    # ASSOCIAÇÃO INTELIGENTE COM NOME DO TIPO DE MATCH (VISUAL)
     lista_nomes_ref = []; dict_ref_ean = {}
     if not df_referencia.empty:
         for idx, row in df_referencia.iterrows():
@@ -300,7 +267,7 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
             melhor, tipo = encontrar_melhor_match(item['nome'], lista_nomes_ref)
             if melhor: 
                 item['ean'] = dict_ref_ean.get(melhor, item['ean'])
-                item['match_tipo'] = tipo # Guarda o tipo para mostrar no visual
+                item['match_tipo'] = tipo
     return dados_nota
 
 # ==============================================================================
@@ -351,14 +318,13 @@ if df is not None:
             baixo_estoque = df[(df['qtd.estoque'] + df['qtd_central']) <= df['qtd_minima']]
             if not baixo_estoque.empty: st.warning(f"🚨 Existem {len(baixo_estoque)} produtos com estoque baixo!")
             if not df_critico.empty: st.error("🚨 Produtos Vencendo!"); st.dataframe(df_critico[['nome do produto', 'validade', 'qtd.estoque']])
-    
+            
     # 1.5 PICKLIST
     elif modo == "🚚 Transferência em Massa (Picklist)":
         st.title(f"🚚 Transferência em Massa - {loja_atual}")
         arquivo_pick = st.file_uploader("📂 Subir Picklist (.xlsx)", type=['xlsx', 'xls'])
         if arquivo_pick:
             try:
-                # CORREÇÃO: dtype=str para ler como string
                 df_pick = pd.read_excel(arquivo_pick, dtype=str)
                 df_pick.columns = df_pick.columns.str.strip().str.lower()
                 col_barras = next((c for c in df_pick.columns if 'barras' in c), None)
@@ -481,30 +447,29 @@ if df is not None:
                         st.markdown(f"**{item['nome']}**")
                         st.caption(f"Qtd: {int(item['qtd'])} | R$ {item['preco_un_liquido']:.2f}")
                     with c2:
-                        match_inicial = "(CRIAR NOVO)"; tipo_match = "Nenhum"
+                        match_inicial = "(CRIAR NOVO)"
+                        tipo_match = "Nenhum"
                         if not df.empty:
                             mask_ean = df['código de barras'].astype(str) == item['ean']
-                            if mask_ean.any():
+                            if mask_ean.any(): 
                                 match_inicial = df.loc[mask_ean, 'nome do produto'].values[0]
                                 tipo_match = "Código de Barras"
-                            elif 'match_tipo' in item and item['match_tipo']:
-                                mel, _ = encontrar_melhor_match(item['nome'], df['nome do produto'].astype(str).tolist())
+                            else:
+                                mel, tipo = encontrar_melhor_match(item['nome'], df['nome do produto'].astype(str).tolist())
                                 if mel: 
                                     match_inicial = mel
-                                    tipo_match = "Nome Similar"
+                                    tipo_match = tipo
                         
                         idx_inicial = lista_produtos_sistema.index(str(match_inicial)) if str(match_inicial) in lista_produtos_sistema else 0
-                        escolha_usuario = st.selectbox(f"Vincular ({tipo_match}):", lista_produtos_sistema, index=idx_inicial, key=f"sel_{i}")
+                        escolhas[i] = st.selectbox(f"Vincular ({tipo_match}):", lista_produtos_sistema, index=idx_inicial, key=f"sel_{i}")
                         
                         # --- RECUPERADO: VISUALIZAÇÃO DO EAN DO SISTEMA PARA COMPARAÇÃO ---
-                        if escolha_usuario != "(CRIAR NOVO)":
-                            row_sis = df[df['nome do produto'] == escolha_usuario]
+                        if escolhas[i] != "(CRIAR NOVO)":
+                            row_sis = df[df['nome do produto'] == escolhas[i]]
                             if not row_sis.empty:
                                 ean_sis = row_sis.iloc[0]['código de barras']
                                 st.markdown(f":blue[**🆔 EAN Sistema: {ean_sis}**]") 
                         # ------------------------------------------------------------------
-                        
-                        escolhas[i] = escolha_usuario
                     st.divider()
                 if st.button("✅ CONFIRMAR E SALVAR ESTOQUE"):
                     novos_hist = []; criados_cont = 0; atualizados_cont = 0
@@ -535,7 +500,7 @@ if df is not None:
                     if novos_hist:
                         df_hist = pd.concat([df_hist, pd.DataFrame(novos_hist)], ignore_index=True)
                         salvar_na_nuvem(f"{prefixo}_historico_compras", df_hist, COLS_HIST)
-                    ler_da_nuvem.clear() 
+                    ler_da_nuvem.clear()
                     st.success(f"Sucesso! {criados_cont} novos, {atualizados_cont} atualizados."); time.sleep(2); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
     
@@ -560,11 +525,10 @@ if df is not None:
         arquivo = st.file_uploader("Planograma (XLSX/CSV)", type=['xlsx', 'xls', 'csv'])
         if arquivo:
             try:
-                # CORREÇÃO: dtype=str para ler como texto
+                # CORREÇÃO: dtype=str
                 if arquivo.name.endswith('.csv'): df_raw = pd.read_csv(arquivo, header=None, dtype=str)
                 else: df_raw = pd.read_excel(arquivo, header=None, dtype=str)
                 
-                # RESTAURAÇÃO: Visualização da tabela
                 st.write("Identifique as colunas:")
                 st.dataframe(df_raw.head())
                 
@@ -586,21 +550,22 @@ if df is not None:
                             cod = str(row[idx_barras]).replace('.0', '').strip()
                             nm = normalizar_texto(str(row[idx_nome]))
                             qtd = converter_numero_seguro(row[idx_qtd])
-                            if dividir_100 and qtd > 0: qtd /= 100
+                            if dividir_100: qtd /= 100
+                            
                             if cod and nm:
                                 mask = df['código de barras'] == cod
                                 if mask.any():
                                     df.loc[mask, 'qtd.estoque'] = qtd
                                     if idx_preco != "(Não Atualizar)":
                                         p = converter_numero_seguro(row[idx_preco])
-                                        if dividir_100 and p > 0: p /= 100
+                                        if dividir_100: p /= 100
                                         if p > 0: df.loc[mask, 'preco_venda'] = p
                                     alt += 1
                                 else:
                                     p_nov = 0.0
                                     if idx_preco != "(Não Atualizar)":
                                         p_nov = converter_numero_seguro(row[idx_preco])
-                                        if dividir_100 and p_nov > 0: p_nov /= 100
+                                        if dividir_100: p_nov /= 100
                                     lst_novos.append({'código de barras': cod, 'nome do produto': nm, 'qtd.estoque': qtd, 'qtd_central': 0, 'qtd_minima': 5, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': 0.0, 'preco_venda': p_nov, 'categoria': 'GERAL', 'ultimo_fornecedor': '', 'preco_sem_desconto': 0.0})
                                     novos += 1
                         except: pass
@@ -608,7 +573,7 @@ if df is not None:
                     if lst_novos: df = pd.concat([df, pd.DataFrame(lst_novos)], ignore_index=True)
                     salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
                     
-                    # Loop protegido para sincronizar
+                    # Atualização em massa protegida
                     for idx, row in df.iterrows():
                         try:
                             atualizar_casa_global(row['nome do produto'], row['qtd_central'], row['preco_custo'], row['preco_venda'], row['validade'], prefixo)
@@ -675,7 +640,7 @@ if df is not None:
                                 atualizar_casa_global(row['nome do produto'], df.at[idx, 'qtd_central'], None, None, None, prefixo)
                                 st.rerun()
         else:
-            # RESTAURAÇÃO: BUSCA POR CÓDIGO E NOME
+            # RESTAURADO: BUSCA POR CÓDIGO + NOME
             df['display_busca'] = df['código de barras'].astype(str) + " - " + df['nome do produto'].astype(str)
             opt = st.selectbox("Produto:", [""] + df['display_busca'].tolist())
             if opt:
@@ -713,7 +678,7 @@ if df is not None:
         st.title("💰 Histórico")
         if not df_hist.empty:
             b = st.text_input("Buscar:"); v = filtrar_dados_inteligente(df_hist, 'produto', b)
-            # RESTAURADO: VISUALIZAÇÃO EDITÁVEL
+            # RESTAURADO: VISUAL EDITÁVEL
             ed = st.data_editor(v, use_container_width=True, num_rows="dynamic")
             if st.button("💾 Salvar"):
                 df_hist = ed; salvar_na_nuvem(f"{prefixo}_historico_compras", df_hist, COLS_HIST); st.success("Salvo!")
@@ -757,7 +722,7 @@ if df is not None:
                 except: pass
             st.success("Salvo!")
         with c2:
-            # FERRAMENTA DE CORREÇÃO FLEXÍVEL (SOLICITADA PARA O ERRO 33,00)
+            # FERRAMENTA DE CORREÇÃO FLEXÍVEL PARA O ERRO 33,00
             div_fator = st.selectbox("Dividir por:", [10, 100], index=0)
             if st.button(f"🚨 Corrigir (Div {div_fator})"):
                 c=0
