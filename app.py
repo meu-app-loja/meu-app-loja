@@ -7,6 +7,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 import time
+import re  # Para limpeza extra de caracteres
 
 # ==============================================================================
 # ⚙️ CONFIGURAÇÃO DE NUVEM (ADAPTADOR TRANSPARENTE)
@@ -33,19 +34,36 @@ def get_google_client():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(json_creds, scope)
     return gspread.authorize(creds)
 
-# --- FUNÇÃO DE CONVERSÃO DE VALORES PT-BR (CORREÇÃO PRINCIPAL) ---
+# --- FUNÇÃO DE CONVERSÃO DE VALORES PT-BR (MELHORADA) ---
 def converter_valor_ptbr(valor):
     if pd.isna(valor) or str(valor).strip() == "":
         return 0.0
     if isinstance(valor, (int, float)):
         return float(valor)
-    s = str(valor).strip().replace("R$", "").replace("r$", "").strip()
-    s = s.replace('.', '')  # Remove pontos de milhar
-    s = s.replace(',', '.')  # Troca vírgula por ponto
+    s = str(valor).strip().replace("R$", "").replace("r$", "").replace(" ", "").strip()
+    # Remove qualquer caractere não numérico/vírgula/ponto/minus
+    s = re.sub(r'[^0-9,\.-]', '', s)
+    # Se tiver vírgula como último separador (decimal), assume BR
+    if ',' in s:
+        parts = s.rsplit(',', 1)
+        if len(parts[1]) <= 2:  # Decimal com até 2 dígitos
+            s = parts[0].replace('.', '') + '.' + parts[1]
+        else:
+            s = s.replace(',', '')
+    else:
+        s = s.replace('.', '')
     try:
         return float(s)
     except:
         return 0.0
+
+# --- FUNÇÃO PARA CORRIGIR VALORES EXISTENTES INFLADOS (UMA VEZ) ---
+def corrigir_valores_inflados(df, cols_num):
+    for col in cols_num:
+        if col in df.columns:
+            mask_inflado = (df[col] > 100) & (df[col] % 1 == 0)  # Inteiro > 100, provável erro (ex: 319 para 3.19)
+            df.loc[mask_inflado, col] = df.loc[mask_inflado, col] / 100
+    return df
 
 # --- FUNÇÃO DE CURA ---
 def garantir_integridade_colunas(df, colunas_alvo):
@@ -147,7 +165,7 @@ def unificar_produtos_por_codigo(df):
     cols_num = ['qtd.estoque', 'qtd_central', 'qtd_minima', 'qtd_comprada', 'preco_custo', 'preco_venda', 'preco_sem_desconto']
     for col in cols_num:
         if col in df.columns: 
-            df[col] = df[col].apply(converter_valor_ptbr)
+            df[col] = df[col].apply(converter_valor_ptbr)  # Correção aqui também
     lista_final = []
     df['código de barras'] = df['código de barras'].astype(str).str.strip()
     sem_codigo = df[df['código de barras'] == ""]
@@ -899,7 +917,7 @@ if df is not None:
             busca_geral = st.text_input("🔍 Buscar na Tabela Geral:", placeholder="Ex: oleo concordia...", key="busca_geral")
             df_visual_geral = filtrar_dados_inteligente(df, 'nome do produto', busca_geral)
             df_edit = st.data_editor(df_visual_geral, use_container_width=True, num_rows="dynamic", key="geral_editor")
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             with c1:
                 if st.button("💾 SALVAR ALTERAÇÕES GERAIS"):
                     indices_originais = df_visual_geral.index.tolist()
@@ -925,3 +943,9 @@ if df is not None:
                     salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
                     st.success(f"✅ Mágica feita! {qtd_antes - qtd_depois} produtos duplicados foram unidos e os nomes corrigidos.")
                     st.balloons(); st.rerun()
+            with c3:
+                if st.button("🛠️ Corrigir Valores Decimais Antigos (Uma Vez)"):
+                    cols_num = ['qtd.estoque', 'qtd_central', 'qtd_minima', 'qtd_comprada', 'preco_custo', 'preco_venda', 'preco_sem_desconto']
+                    df = corrigir_valores_inflados(df, cols_num)
+                    salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
+                    st.success("Valores inflados corrigidos (ex: 319.00 -> 3.19). Verifique e salve novamente se necessário!"); st.rerun()
