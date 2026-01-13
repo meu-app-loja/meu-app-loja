@@ -37,7 +37,6 @@ def get_google_client():
 def converter_numero_seguro(valor):
     """
     Converte qualquer bagunça para float correto.
-    Tenta detectar erros de magnitude (ex: 11599 -> 115.99) se parecer preço.
     """
     if pd.isna(valor) or valor == "":
         return 0.0
@@ -74,7 +73,7 @@ def garantir_integridade_colunas(df, colunas_alvo):
             else: df[col] = ""
     return df
 
-# --- LEITURA DA NUVEM (COM CORREÇÃO FORTE DE NÚMEROS) ---
+# --- LEITURA DA NUVEM ---
 @st.cache_data(ttl=60)
 def ler_da_nuvem(nome_aba, colunas_padrao):
     time.sleep(0.5) # Pausa leve para API respirar
@@ -94,11 +93,9 @@ def ler_da_nuvem(nome_aba, colunas_padrao):
         # CORREÇÃO DE VALORES (BLINDADA)
         for col in df.columns:
             c_low = col.lower()
-            # Se for coluna de número (preço, quantidade, valor)
             if any(x in c_low for x in ['qtd', 'preco', 'valor', 'custo', 'total', 'desconto']):
                 df[col] = df[col].apply(converter_numero_seguro)
             
-            # Se for data
             if 'data' in c_low or 'validade' in c_low:
                 df[col] = pd.to_datetime(df[col], errors='coerce')
         return df
@@ -119,7 +116,6 @@ def salvar_na_nuvem(nome_aba, df, colunas_padrao):
         for col in df_save.columns:
             c_low = col.lower()
             if any(x in c_low for x in ['qtd', 'preco', 'valor', 'custo', 'total', 'desconto']):
-                 # Força float para garantir que o Google Sheets entenda como número
                  df_save[col] = df_save[col].apply(converter_numero_seguro)
             
             if pd.api.types.is_datetime64_any_dtype(df_save[col]):
@@ -779,17 +775,39 @@ if df is not None:
 
     # 9. GERAL
     elif modo == "📋 Tabela Geral":
-        st.title("📋 Geral")
-        b = st.text_input("Buscar:"); v = filtrar_dados_inteligente(df, 'nome do produto', b)
-        ed = st.data_editor(v, use_container_width=True, num_rows="dynamic")
-        c1, c2 = st.columns(2)
-        if c1.button("💾 Salvar"):
-            df.update(ed); salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
-            for i, r in ed.iterrows(): atualizar_casa_global(df.at[i, 'nome do produto'], r['qtd_central'], r['preco_custo'], r['preco_venda'], None, prefixo)
-            st.success("Salvo!")
-        if c2.button("🆘 CORRIGIR PREÇOS (Div 100)"):
-            c = 0
-            for i, r in df.iterrows():
-                if r['preco_venda'] > 100: df.at[i, 'preco_venda'] /= 100; c+=1
-                if r['preco_custo'] > 100: df.at[i, 'preco_custo'] /= 100
-            salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS); st.success(f"{c} corrigidos!"); st.rerun()
+        st.title("📋 Visão Geral (Editável)")
+        b = st.text_input("Buscar na Tabela Geral:", placeholder="Ex: oleo...", key="busca_geral")
+        df_visual_geral = filtrar_dados_inteligente(df, 'nome do produto', b)
+        df_edit = st.data_editor(df_visual_geral, use_container_width=True, num_rows="dynamic", key="geral_editor")
+        
+        st.divider()
+        c1, c2 = st.columns([1, 1])
+        
+        with c1:
+            if st.button("💾 SALVAR ALTERAÇÕES DA TABELA"):
+                df.update(df_edit)
+                salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
+                for i, r in df_edit.iterrows():
+                    atualizar_casa_global(df.at[i, 'nome do produto'], r['qtd_central'], r['preco_custo'], r['preco_venda'], None, prefixo)
+                st.success("Tabela salva com sucesso!")
+        
+        with c2:
+            st.markdown("### 🛠️ Painel de Correção Manual")
+            with st.form("form_correcao"):
+                fator = st.selectbox("Dividir valores por:", [10, 100], index=0, help="Use 10 para transformar 33 em 3,30. Use 100 para transformar 330 em 3,30.")
+                corte = st.number_input("Corrigir apenas valores MAIORES que:", value=10.0)
+                
+                if st.form_submit_button("🚨 APLICAR CORREÇÃO"):
+                    count = 0
+                    for idx, row in df.iterrows():
+                        # Corrige Custo
+                        if row['preco_custo'] > corte:
+                            df.at[idx, 'preco_custo'] = row['preco_custo'] / fator
+                            count += 1
+                        # Corrige Venda
+                        if row['preco_venda'] > corte:
+                            df.at[idx, 'preco_venda'] = row['preco_venda'] / fator
+                            count += 1
+                    
+                    salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
+                    st.warning(f"Pronto! {count} preços foram divididos por {fator}. Verifique a tabela."); st.rerun()
