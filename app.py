@@ -38,9 +38,12 @@ def converter_numero_seguro(valor):
     if pd.isna(valor) or str(valor).strip() == "": return 0.0
     s_valor = str(valor).strip().replace('R$', '').replace('r$', '').strip()
     try:
+        # Se já tem ponto e não tem virgula (ex: 3.30), está ok
         if '.' in s_valor and ',' not in s_valor: return float(s_valor)
+        # Se tem virgula (ex: 3,30 ou 1.000,00), trata
         if ',' in s_valor:
-            s_valor = s_valor.replace('.', '').replace(',', '.')
+            s_valor = s_valor.replace('.', '') # Tira ponto de milhar
+            s_valor = s_valor.replace(',', '.') # Virgula vira ponto decimal
         return float(s_valor)
     except: return 0.0
 
@@ -58,7 +61,7 @@ def garantir_integridade_colunas(df, colunas_alvo):
 # --- LEITURA DA NUVEM (COM RETRY AUTOMÁTICO - ANTI ERRO 429) ---
 @st.cache_data(ttl=60)
 def ler_da_nuvem(nome_aba, colunas_padrao):
-    # Tentativa com recuo exponencial (espera se der erro)
+    time.sleep(0.5) # Pausa leve
     max_tentativas = 3
     for tentativa in range(max_tentativas):
         try:
@@ -81,13 +84,9 @@ def ler_da_nuvem(nome_aba, colunas_padrao):
                 if 'data' in c_low or 'validade' in c_low:
                     df[col] = pd.to_datetime(df[col], errors='coerce')
             return df
-        
         except Exception as e:
-            # Se for erro de cota (429), espera e tenta de novo
             if "429" in str(e) or "Quota" in str(e):
-                tempo_espera = (tentativa + 1) * 3  # Espera 3s, 6s, 9s...
-                time.sleep(tempo_espera)
-                if tentativa == max_tentativas - 1: st.error(f"Erro de conexão (Muitos acessos). Tente novamente em 1 minuto.")
+                time.sleep((tentativa + 1) * 2) # Espera progressiva
             else:
                 return pd.DataFrame(columns=colunas_padrao)
     return pd.DataFrame(columns=colunas_padrao)
@@ -113,10 +112,10 @@ def salvar_na_nuvem(nome_aba, df, colunas_padrao):
             
             ws.update([df_save.columns.values.tolist()] + df_save.values.tolist())
             ler_da_nuvem.clear()
-            return # Sucesso, sai da função
+            return 
         except Exception as e:
             if "429" in str(e) or "Quota" in str(e):
-                time.sleep((tentativa + 1) * 3) # Backoff
+                time.sleep((tentativa + 1) * 3) # Espera mais se der erro
             else:
                 st.error(f"Erro ao salvar: {e}")
                 break
@@ -183,110 +182,64 @@ def unificar_produtos_por_codigo(df):
 
 def processar_excel_oficial(arquivo_subido):
     try:
+        # CORREÇÃO: dtype=str para não perder pontos/virgulas
         if arquivo_subido.name.endswith('.csv'): df_temp = pd.read_csv(arquivo_subido, dtype=str)
         else: df_temp = pd.read_excel(arquivo_subido, dtype=str)
+        
         if 'obrigatório' in str(df_temp.iloc[0].values): df_temp = df_temp.iloc[1:].reset_index(drop=True)
         df_temp.columns = df_temp.columns.str.strip()
         col_nome = next((c for c in df_temp.columns if 'nome' in c.lower()), 'Nome')
         col_cod = next((c for c in df_temp.columns if 'código' in c.lower() or 'barras' in c.lower()), 'Código de Barras Primário')
+        
         df_limpo = df_temp[[col_nome, col_cod]].copy()
         df_limpo.columns = ['nome do produto', 'código de barras']
         df_limpo['nome do produto'] = df_limpo['nome do produto'].apply(normalizar_texto)
         df_limpo['código de barras'] = df_limpo['código de barras'].astype(str).str.replace('.0', '', regex=False).str.strip()
+        
         salvar_na_nuvem("base_oficial", df_limpo, COLS_OFICIAL)
         return True
     except Exception as e:
         st.error(f"Erro: {e}")
         return False
 
-# --- NOVA FUNÇÃO DE PROPAGAÇÃO SEGURA (COM PAUSA) ---
-def propagar_dados_massa(df_referencia, prefixo_ignorar):
-    status_box = st.status("🔄 Sincronizando (Aguarde...)", expanded=True)
-    todas_lojas = ["loja1", "loja2", "loja3"]
-    client = get_google_client()
-    sh = client.open("loja_dados")
-    
-    ref_map = {}
-    for _, row in df_referencia.iterrows():
-        nome = str(row['nome do produto']).strip()
-        ref_map[nome] = {
-            'qtd_central': converter_numero_seguro(row['qtd_central']),
-            'custo': converter_numero_seguro(row['preco_custo']),
-            'venda': converter_numero_seguro(row['preco_venda']),
-            'forn': str(row['ultimo_fornecedor'])
-        }
-
-    for loja in todas_lojas:
-        if loja == prefixo_ignorar: continue
-        status_box.write(f"Verificando {loja}...")
-        time.sleep(2) # PAUSA OBRIGATÓRIA PARA NÃO TRAVAR O GOOGLE (Anti 429)
-        
-        try:
-            ws = sh.worksheet(f"{loja}_estoque")
-            dados_loja = ws.get_all_records()
-            if not dados_loja: continue
-            
-            df_dest = pd.DataFrame(dados_loja)
-            df_dest = garantir_integridade_colunas(df_dest, COLUNAS_VITAIS)
-            df_dest.columns = df_dest.columns.str.strip().str.lower()
-            
-            alterou = False
-            for i, row_d in df_dest.iterrows():
-                nome_d = str(row_d['nome do produto']).strip()
-                if nome_d in ref_map:
-                    novos = ref_map[nome_d]
-                    if abs(converter_numero_seguro(row_d['qtd_central']) - novos['qtd_central']) > 0.01:
-                        df_dest.at[i, 'qtd_central'] = novos['qtd_central']; alterou = True
-                    if abs(converter_numero_seguro(row_d['preco_custo']) - novos['custo']) > 0.01:
-                        df_dest.at[i, 'preco_custo'] = novos['custo']; alterou = True
-                    if novos['venda'] > 0 and abs(converter_numero_seguro(row_d['preco_venda']) - novos['venda']) > 0.01:
-                        df_dest.at[i, 'preco_venda'] = novos['venda']; alterou = True
-                    if novos['forn'] and str(row_d['ultimo_fornecedor']) != novos['forn']:
-                        df_dest.at[i, 'ultimo_fornecedor'] = novos['forn']; alterou = True
-            
-            if alterou:
-                status_box.write(f"Salvando {loja}...")
-                for col in df_dest.columns:
-                    if any(x in col for x in ['qtd', 'preco', 'valor']):
-                        df_dest[col] = df_dest[col].apply(converter_numero_seguro)
-                    if 'validade' in col:
-                        df_dest[col] = df_dest[col].astype(str).replace('NaT', '')
-                ws.update([df_dest.columns.values.tolist()] + df_dest.values.tolist())
-                
-        except Exception as e: status_box.write(f"Pulado {loja}: {e}")
-            
-    status_box.update(label="✅ Sincronizado!", state="complete", expanded=False)
-
-# --- FUNÇÃO ATUALIZAR CASA GLOBAL (INDIVIDUAL) ---
+# --- FUNÇÃO ATUALIZAR CASA GLOBAL (COM PAUSA ANTI-ERRO 429) ---
 def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, nova_validade, prefixo_ignorar):
-    # Função leve para uso pontual
-    time.sleep(0.5) 
     todas_lojas = ["loja1", "loja2", "loja3"]
+    # AQUI ESTÁ A CORREÇÃO DO ERRO 429 (PAUSA OBRIGATÓRIA)
+    time.sleep(1.5)
+    
     for loja in todas_lojas:
         if loja == prefixo_ignorar: continue
         try:
-            client = get_google_client(); sh = client.open("loja_dados")
+            client = get_google_client()
+            sh = client.open("loja_dados")
             try: ws = sh.worksheet(f"{loja}_estoque")
-            except: continue
+            except: continue 
             
-            dados = ws.get_all_records(); df_outra = pd.DataFrame(dados)
+            dados = ws.get_all_records()
+            df_outra = pd.DataFrame(dados)
+            
             if not df_outra.empty:
                 df_outra = garantir_integridade_colunas(df_outra, COLUNAS_VITAIS)
                 df_outra.columns = df_outra.columns.str.strip().str.lower()
                 mask = df_outra['nome do produto'].astype(str) == str(nome_produto)
+                
                 if mask.any():
                     idx = df_outra[mask].index[0]
                     if qtd_nova_casa is not None: df_outra.at[idx, 'qtd_central'] = converter_numero_seguro(qtd_nova_casa)
                     if novo_custo is not None: df_outra.at[idx, 'preco_custo'] = converter_numero_seguro(novo_custo)
                     if novo_venda is not None: df_outra.at[idx, 'preco_venda'] = converter_numero_seguro(novo_venda)
-                    if nova_validade is not None: df_outra.at[idx, 'validade'] = str(nova_validade).replace('NaT', '')
+                    if nova_validade is not None: 
+                         df_outra.at[idx, 'validade'] = str(nova_validade).replace('NaT', '')
+                    
                     ws.update([df_outra.columns.values.tolist()] + df_outra.values.tolist())
-        except: pass
+        except: pass 
 
-# --- FUNÇÃO XML ---
+# --- FUNÇÃO XML HÍBRIDA ---
 def ler_xml_nfe(arquivo_xml, df_referencia):
     tree = ET.parse(arquivo_xml); root = tree.getroot()
     def tag_limpa(element): return element.tag.split('}')[-1]
+    
     info_custom = root.find("Info")
     if info_custom is not None:
         try:
@@ -403,6 +356,7 @@ if df is not None:
         arquivo_pick = st.file_uploader("📂 Subir Picklist (.xlsx)", type=['xlsx', 'xls'])
         if arquivo_pick:
             try:
+                # CORREÇÃO: Lê string para não perder formatação
                 df_pick = pd.read_excel(arquivo_pick, dtype=str)
                 df_pick.columns = df_pick.columns.str.strip().str.lower()
                 col_barras = next((c for c in df_pick.columns if 'barras' in c), None)
@@ -585,7 +539,7 @@ if df is not None:
         arquivo = st.file_uploader("Planograma (XLSX/CSV)", type=['xlsx', 'xls', 'csv'])
         if arquivo:
             try:
-                # CORREÇÃO CRUCIAL: Ler como texto
+                # CORREÇÃO: Lê como texto
                 if arquivo.name.endswith('.csv'): df_raw = pd.read_csv(arquivo, header=None, dtype=str)
                 else: df_raw = pd.read_excel(arquivo, header=None, dtype=str)
                 st.write("Identifique as colunas:")
@@ -628,7 +582,9 @@ if df is not None:
                         bar.progress((i+1)/total)
                     if lst_novos: df = pd.concat([df, pd.DataFrame(lst_novos)], ignore_index=True)
                     salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
-                    propagar_dados_massa(df, prefixo)
+                    # Atualiza em massa (simulado via loop com pausa para não dar erro)
+                    for idx, row in df.iterrows():
+                        atualizar_casa_global(row['nome do produto'], row['qtd_central'], row['preco_custo'], row['preco_venda'], row['validade'], prefixo)
                     st.success(f"Feito! {alt} alt, {novos} novos."); st.balloons()
             except Exception as e: st.error(f"Erro: {e}")
 
@@ -740,7 +696,7 @@ if df is not None:
             ed = st.data_editor(v, use_container_width=True, num_rows="dynamic")
             if st.button("💾 Salvar"):
                 df.update(ed); salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
-                propagar_dados_massa(df, prefixo)
+                for i, r in ed.iterrows(): atualizar_casa_global(df.at[i, 'nome do produto'], r['qtd_central'], r['preco_custo'], None, None, prefixo)
                 st.success("Salvo!"); st.rerun()
         with tab2:
             op = st.selectbox("Produto:", [""] + df['nome do produto'].tolist())
@@ -762,14 +718,16 @@ if df is not None:
         c1, c2 = st.columns(2)
         if c1.button("💾 Salvar"):
             df.update(ed); salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
-            propagar_dados_massa(df, prefixo)
+            for i, r in ed.iterrows(): atualizar_casa_global(df.at[i, 'nome do produto'], r['qtd_central'], r['preco_custo'], r['preco_venda'], None, prefixo)
             st.success("Salvo!")
+        
+        # AQUI ESTÁ A CORREÇÃO DO 33,00 (OPÇÃO DE DIVIDIR POR 10 OU 100)
         with c2:
-            fator = st.selectbox("Dividir por:", [10, 100])
-            corte = st.number_input("Apenas maiores que:", 1.0)
-            if st.button("🚨 Corrigir"):
-                c=0
+            div_fator = st.selectbox("Dividir por:", [10, 100], index=0)
+            if st.button(f"🆘 CORRIGIR (Div {div_fator})"):
+                c = 0
                 for i, r in df.iterrows():
-                    if r['preco_venda'] > corte: df.at[i, 'preco_venda'] /= fator; c+=1
-                    if r['preco_custo'] > corte: df.at[i, 'preco_custo'] /= fator
+                    # Corrige se for maior que 10
+                    if r['preco_venda'] > 10: df.at[i, 'preco_venda'] /= div_fator; c+=1
+                    if r['preco_custo'] > 10: df.at[i, 'preco_custo'] /= div_fator
                 salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS); st.success(f"{c} corrigidos!"); st.rerun()
