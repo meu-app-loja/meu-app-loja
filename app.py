@@ -40,7 +40,7 @@ def garantir_integridade_colunas(df, colunas_alvo):
             else: df[col] = ""
     return df
 
-# --- LEITURA DA NUVEM ---
+# --- LEITURA DA NUVEM (COM CORREÇÃO DE VÍRGULA/PONTO) ---
 @st.cache_data(ttl=60)
 def ler_da_nuvem(nome_aba, colunas_padrao):
     time.sleep(1) # Pausa técnica
@@ -57,14 +57,17 @@ def ler_da_nuvem(nome_aba, colunas_padrao):
         df = garantir_integridade_colunas(df, colunas_padrao)
         for col in df.columns:
             c_low = col.lower()
-            if any(x in c_low for x in ['qtd', 'preco', 'valor', 'custo', 'total']):
+            if any(x in c_low for x in ['qtd', 'preco', 'valor', 'custo', 'total', 'desconto']):
+                # CORREÇÃO: Substitui vírgula por ponto antes de converter
+                if df[col].dtype == object:
+                    df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             if 'data' in c_low or 'validade' in c_low:
                 df[col] = pd.to_datetime(df[col], errors='coerce')
         return df
     except: return pd.DataFrame(columns=colunas_padrao)
 
-# --- SALVAR NA NUVEM ---
+# --- SALVAR NA NUVEM (SUBSTITUI O TO_EXCEL) ---
 def salvar_na_nuvem(nome_aba, df, colunas_padrao):
     try:
         client = get_google_client()
@@ -81,7 +84,7 @@ def salvar_na_nuvem(nome_aba, df, colunas_padrao):
     except Exception as e: st.error(f"Erro ao salvar: {e}")
 
 # ==============================================================================
-# 🧠 SUAS FUNÇÕES ORIGINAIS (MOVIDAS PARA O TOPO E INTACTAS)
+# 🧠 SUAS FUNÇÕES ORIGINAIS (MANTIDAS 100%)
 # ==============================================================================
 def normalizar_texto(texto):
     if not isinstance(texto, str): return str(texto) if pd.notnull(texto) else ""
@@ -142,8 +145,7 @@ def unificar_produtos_por_codigo(df):
 
 def processar_excel_oficial(arquivo_subido):
     try:
-        if arquivo_subido.name.endswith('.csv'): df_temp = pd.read_csv(arquivo_subido)
-        else: df_temp = pd.read_excel(arquivo_subido)
+        df_temp = pd.read_csv(arquivo_subido) if arquivo_subido.name.endswith('.csv') else pd.read_excel(arquivo_subido)
         if 'obrigatório' in str(df_temp.iloc[0].values): df_temp = df_temp.iloc[1:].reset_index(drop=True)
         df_temp.columns = df_temp.columns.str.strip()
         col_nome = next((c for c in df_temp.columns if 'nome' in c.lower()), 'Nome')
@@ -243,16 +245,15 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
             nm = normalizar_texto(row['nome do produto'])
             dict_ref_ean[nm] = str(row['código de barras']).strip()
             lista_nomes_ref.append(nm)
-    
     for item in dados_nota['itens']:
         if item['ean'] in ['SEM GTIN', '', 'None', 'NAN'] and lista_nomes_ref:
             melhor, _ = encontrar_melhor_match(item['nome'], lista_nomes_ref)
             if melhor: item['ean'] = dict_ref_ean.get(melhor, item['ean'])
-
+            
     return dados_nota
 
 # ==============================================================================
-# 🚀 INÍCIO DO APP (INTERFACE INTACTA)
+# 🚀 INÍCIO DO APP
 # ==============================================================================
 
 st.sidebar.title("🏢 Seleção da Loja")
@@ -345,7 +346,7 @@ if df is not None:
         tab_lista, tab_add = st.tabs(["📋 Ver Lista Atual", "➕ Adicionar Itens"])
         with tab_lista:
             if not df_lista_compras.empty:
-                st.info("💡 Esta é sua lista de compras. Quando for ao mercado, use esta tabela.")
+                st.info("💡 Esta é sua lista de compras.")
                 if usar_modo_mobile:
                     for idx, row in df_lista_compras.iterrows():
                         with st.container(border=True):
@@ -356,7 +357,7 @@ if df is not None:
                 else: st.dataframe(df_lista_compras, use_container_width=True)
                 c_del, c_pdf = st.columns(2)
                 if c_del.button("🗑️ Limpar Lista Inteira (Após Comprar)"):
-                    salvar_na_nuvem(f"{prefixo}_lista_compras", pd.DataFrame(columns=COLS_LISTA), COLS_LISTA); st.success("Lista limpa!"); st.rerun()
+                    salvar_na_nuvem(f"{prefixo}_lista_compras", pd.DataFrame(columns=['produto', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status']), COLS_LISTA); st.success("Lista limpa!"); st.rerun()
             else: st.info("Sua lista de compras está vazia.")
         with tab_add:
             st.subheader("🤖 Gerador Automático")
@@ -733,7 +734,7 @@ if df is not None:
                         df.at[idx, 'preco_venda'] = venda
                         df.at[idx, 'status_compra'] = 'OK'
                         df.at[idx, 'qtd_comprada'] = 0
-                        df.at[idx, 'ultimo_fornecedor'] = forn_compra 
+                        df.at[idx, 'ultimo_fornecedor'] = forn_compra 
                         salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
                         atualizar_casa_global(item, df.at[idx, 'qtd_central'], custo, venda, None, prefixo)
                         dt_full = datetime.combine(dt_compra, hr_compra)
@@ -751,18 +752,18 @@ if df is not None:
             df_hist_visual = df_hist
             if busca_hist_precos:
                 df_hist_visual = filtrar_dados_inteligente(df_hist, 'produto', busca_hist_precos)
-                if df_hist_visual.empty: 
+                if df_hist_visual.empty: 
                     df_hist_visual = filtrar_dados_inteligente(df_hist, 'fornecedor', busca_hist_precos)
             st.info("✅ Você pode editar ou **excluir** linhas (selecione a linha e aperte Delete).")
             df_editado = st.data_editor(
-                df_hist_visual.sort_values(by='data', ascending=False), 
-                use_container_width=True, 
-                key="editor_historico_geral", 
-                num_rows="dynamic", 
+                df_hist_visual.sort_values(by='data', ascending=False), 
+                use_container_width=True, 
+                key="editor_historico_geral", 
+                num_rows="dynamic", 
                 column_config={
-                    "preco_sem_desconto": st.column_config.NumberColumn("Preço Tabela", format="R$ %.2f"), 
-                    "desconto_total_money": st.column_config.NumberColumn("Desconto TOTAL", format="R$ %.2f"), 
-                    "preco_pago": st.column_config.NumberColumn("Pago (Unit)", format="R$ %.2f", disabled=True), 
+                    "preco_sem_desconto": st.column_config.NumberColumn("Preço Tabela", format="R$ %.2f"), 
+                    "desconto_total_money": st.column_config.NumberColumn("Desconto TOTAL", format="R$ %.2f"), 
+                    "preco_pago": st.column_config.NumberColumn("Pago (Unit)", format="R$ %.2f", disabled=True), 
                     "total_gasto": st.column_config.NumberColumn("Total Gasto", format="R$ %.2f", disabled=True)
                 }
             )
