@@ -1007,3 +1007,4 @@ if df is not None:
                     salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
                     st.success(f"✅ {qtd_antes - qtd_depois} produtos duplicados foram unidos.")
                     st.balloons(); st.rerun()
+
