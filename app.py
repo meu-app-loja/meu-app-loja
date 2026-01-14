@@ -9,17 +9,11 @@ import json
 import time
 import re
 
-# Removido locale.setlocale para evitar erro em ambientes sem suporte a 'pt_BR.UTF-8'
-
-# Função para formatar números no estilo brasileiro (milhar '.', decimal ',')
-def format_br(valor):
-    s = f"{valor:,.2f}"  # Formata com , para milhar e . para decimal
-    return s.replace(',', 'X').replace('.', ',').replace('X', '.')
-
 # ==============================================================================
 # ⚙️ CONFIGURAÇÃO DE NUVEM & SISTEMA
 # ==============================================================================
 st.set_page_config(page_title="Gestão Multi-Lojas", layout="wide", page_icon="🏪")
+
 # --- DEFINIÇÃO DE COLUNAS OBRIGATÓRIAS (GLOBAL) ---
 COLUNAS_VITAIS = [
     'código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central',
@@ -31,6 +25,7 @@ COLS_MOV = ['data_hora', 'produto', 'qtd_movida']
 COLS_VENDAS = ['data_hora', 'produto', 'qtd_vendida', 'estoque_restante']
 COLS_LISTA = ['produto', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status']
 COLS_OFICIAL = ['nome do produto', 'código de barras']
+
 # --- CONEXÃO SEGURA ---
 @st.cache_resource
 def get_google_client():
@@ -38,117 +33,134 @@ def get_google_client():
     json_creds = json.loads(st.secrets["service_account_json"])
     creds = ServiceAccountCredentials.from_json_keyfile_dict(json_creds, scope)
     return gspread.authorize(creds)
-# --- FUNÇÃO DE LIMPEZA E CONVERSÃO DE NÚMEROS (CORREÇÃO 3,19) ---
+
+# --- FUNÇÃO DE LIMPEZA E CONVERSÃO DE NÚMEROS (CORREÇÃO 3,19 -> 3.19) ---
 def converter_ptbr(valor):
     """Converte valores brasileiros (com vírgula) para padrão computador (ponto) sem erros."""
     if pd.isna(valor) or str(valor).strip() == "":
         return 0.0
-   
-    s = str(valor).strip().upper().replace('R$', '').strip()
-   
-    # Se já for um número puro, retorna
+    
+    # Remove R$, espaços e converte para maiúsculo
+    s = str(valor).strip().upper().replace('R$', '').replace(' ', '')
+    
     try:
-        return float(s)
-    except:
-        pass
-    # Lógica para 1.000,00 -> 1000.00
-    if ',' in s and '.' in s:
-        s = s.replace('.', '') # Tira o ponto de milhar
-        s = s.replace(',', '.') # Troca virgula por ponto
-    elif ',' in s:
-        s = s.replace(',', '.') # Troca virgula por ponto
-       
-    try:
+        # Se tem ponto e vírgula (ex: 1.000,00) -> remove ponto, troca virgula por ponto
+        if ',' in s and '.' in s:
+            s = s.replace('.', '').replace(',', '.')
+        # Se só tem vírgula (ex: 3,19) -> troca virgula por ponto
+        elif ',' in s:
+            s = s.replace(',', '.')
+        # Se só tem ponto (ex: 3.19 ou 1000) -> deixa como está
+        
         return float(s)
     except:
         return 0.0
+
+# --- FUNÇÃO DE FORMATAÇÃO VISUAL (PARA O ECRÃ) ---
+def format_br(valor):
+    try:
+        return f"R$ {float(valor):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+    except:
+        return "R$ 0,00"
+
 # --- FUNÇÃO DE CURA ---
 def garantir_integridade_colunas(df, colunas_alvo):
     if df.empty: return pd.DataFrame(columns=colunas_alvo)
-   
+    
     # Normaliza nomes das colunas
     df.columns = df.columns.str.strip().str.lower()
-   
+    
     # Garante que todas as colunas vitais existem
     for col in colunas_alvo:
         if col not in df.columns:
-            if any(x in col for x in ['qtd', 'preco', 'valor', 'custo', 'total']):
+            if any(x in col for x in ['qtd', 'preco', 'valor', 'custo', 'total']): 
                 df[col] = 0.0
-            elif 'data' in col or 'validade' in col:
+            elif 'data' in col or 'validade' in col: 
                 df[col] = None
-            else:
+            else: 
                 df[col] = ""
-   
-    # Garante que colunas numéricas sejam números de verdade
+    
+    # Garante que colunas numéricas sejam números de verdade (CORREÇÃO IMPORTANTE)
     for col in df.columns:
         if any(x in col for x in ['qtd', 'preco', 'valor', 'custo', 'total', 'desconto']):
+            # Aplica o conversor linha a linha para garantir
             df[col] = df[col].apply(converter_ptbr)
-           
+            
     return df
-# --- LEITURA DA NUVEM (CORRIGIDA PARA NÃO APAGAR DADOS) ---
+
+# --- LEITURA DA NUVEM (CORRIGIDA) ---
 @st.cache_data(ttl=60)
 def ler_da_nuvem(nome_aba, colunas_padrao):
-    time.sleep(1) # Pausa técnica para evitar bloqueio do Google
+    time.sleep(1) # Pausa técnica
     try:
         client = get_google_client()
         sh = client.open("loja_dados")
-        try:
+        try: 
             ws = sh.worksheet(nome_aba)
         except:
             ws = sh.add_worksheet(title=nome_aba, rows=2000, cols=20)
             ws.append_row(colunas_padrao)
             return pd.DataFrame(columns=colunas_padrao)
-       
+        
         dados = ws.get_all_records()
         df = pd.DataFrame(dados)
-       
-        # Se a tabela vier vazia, retorna estrutura vazia
+        
         if df.empty:
             return pd.DataFrame(columns=colunas_padrao)
+
         df = garantir_integridade_colunas(df, colunas_padrao)
-       
+        
         # Tratamento especial para Datas
         for col in df.columns:
             if 'data' in col or 'validade' in col:
                 df[col] = pd.to_datetime(df[col], errors='coerce')
-               
+                
         return df
-    except Exception as e:
-        # Em caso de erro grave, não retorna vazio para não apagar o cache local visual
+    except Exception as e: 
         return pd.DataFrame(columns=colunas_padrao)
-# --- SALVAR NA NUVEM ---
+
+# --- SALVAR NA NUVEM (COM TRAVA DE SEGURANÇA ANTI-APAGAR) ---
 def salvar_na_nuvem(nome_aba, df, colunas_padrao):
+    # TRAVA DE SEGURANÇA: Se o DF estiver vazio e for uma aba de estoque, aborta para não apagar dados!
+    if df.empty and ("estoque" in nome_aba or "historico" in nome_aba):
+        st.error("⚠️ ALERTA DE SEGURANÇA: O sistema impediu que seus dados fossem apagados devido a um erro de leitura. Tente novamente.")
+        return
+
     try:
         client = get_google_client()
         sh = client.open("loja_dados")
         try: ws = sh.worksheet(nome_aba)
         except: ws = sh.add_worksheet(title=nome_aba, rows=2000, cols=20)
-       
+        
         ws.clear()
-       
-        # Prepara cópia para salvar (transforma datas em texto para o Excel não reclamar)
+        
+        # Prepara cópia para salvar
         df_save = garantir_integridade_colunas(df.copy(), colunas_padrao)
-       
+        
         for col in df_save.columns:
             if pd.api.types.is_datetime64_any_dtype(df_save[col]):
-                df_save[col] = df_save[col].dt.strftime('%Y-%m-%d')  # Formato ISO para consistência
-               
+                df_save[col] = df_save[col].dt.strftime('%Y-%m-%d').replace('NaT', '')
+                
         ws.update([df_save.columns.values.tolist()] + df_save.values.tolist())
-        ler_da_nuvem.clear() # Limpa o cache para forçar atualização nos menus
+        ler_da_nuvem.clear() # Limpa cache para atualizar menus imediatamente
     except Exception as e:
         st.error(f"Erro ao salvar: {e}")
+
 # ==============================================================================
-# 🧠 FUNÇÕES LÓGICAS (MANTIDAS E AJUSTADAS)
+# 🧠 FUNÇÕES LÓGICAS
 # ==============================================================================
 def normalizar_texto(texto):
     if not isinstance(texto, str): return str(texto) if pd.notnull(texto) else ""
     texto = unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('ASCII')
     return texto.upper().strip()
+
 def normalizar_para_busca(texto): return normalizar_texto(texto)
+
 def filtrar_dados_inteligente(df, coluna_busca, texto_busca):
     if not texto_busca: return df
     mask = df[coluna_busca].astype(str).apply(lambda x: normalizar_para_busca(texto_busca) in normalizar_para_busca(x))
     return df[mask]
+
 def calcular_pontuacao(nome_xml, nome_sistema):
     set_xml = set(normalizar_para_busca(nome_xml).split())
     set_sis = set(normalizar_para_busca(nome_sistema).split())
@@ -160,6 +172,7 @@ def calcular_pontuacao(nome_xml, nome_sistema):
         if any(u in palavra for u in ['L', 'ML', 'KG', 'G', 'M']):
             if any(c.isdigit() for c in palavra): score += 0.5
     return score
+
 def encontrar_melhor_match(nome_buscado, lista_opcoes, cutoff=0.3):
     melhor_match = None; maior_score = 0.0
     for opcao in lista_opcoes:
@@ -168,16 +181,17 @@ def encontrar_melhor_match(nome_buscado, lista_opcoes, cutoff=0.3):
         if score > maior_score: maior_score = score; melhor_match = opcao
     if maior_score >= cutoff: return melhor_match, "Nome Similar (Palavras)"
     return None, "Nenhum"
+
 def unificar_produtos_por_codigo(df):
     if df.empty: return df
     df = garantir_integridade_colunas(df, COLUNAS_VITAIS)
-   
+    
     lista_final = []
     df['código de barras'] = df['código de barras'].astype(str).str.strip()
-   
+    
     sem_codigo = df[df['código de barras'] == ""]
     com_codigo = df[df['código de barras'] != ""]
-   
+    
     for cod, grupo in com_codigo.groupby('código de barras'):
         if len(grupo) > 1:
             melhor_nome = max(grupo['nome do produto'].tolist(), key=len)
@@ -188,30 +202,32 @@ def unificar_produtos_por_codigo(df):
             base_ref['preco_venda'] = grupo['preco_venda'].max()
             lista_final.append(base_ref)
         else: lista_final.append(grupo.iloc[0].to_dict())
-       
+        
     df_novo = pd.DataFrame(lista_final)
     if not sem_codigo.empty: df_novo = pd.concat([df_novo, sem_codigo], ignore_index=True)
     return df_novo
+
 def processar_excel_oficial(arquivo_subido):
     try:
         if arquivo_subido.name.endswith('.csv'): df_temp = pd.read_csv(arquivo_subido)
         else: df_temp = pd.read_excel(arquivo_subido)
-       
+        
         if 'obrigatório' in str(df_temp.iloc[0].values): df_temp = df_temp.iloc[1:].reset_index(drop=True)
         df_temp.columns = df_temp.columns.str.strip()
         col_nome = next((c for c in df_temp.columns if 'nome' in c.lower()), 'Nome')
         col_cod = next((c for c in df_temp.columns if 'código' in c.lower() or 'barras' in c.lower()), 'Código de Barras Primário')
-       
+        
         df_limpo = df_temp[[col_nome, col_cod]].copy()
         df_limpo.columns = ['nome do produto', 'código de barras']
         df_limpo['nome do produto'] = df_limpo['nome do produto'].apply(normalizar_texto)
         df_limpo['código de barras'] = df_limpo['código de barras'].astype(str).str.replace('.0', '', regex=False).str.strip()
-       
+        
         salvar_na_nuvem("base_oficial", df_limpo, COLS_OFICIAL)
         return True
     except Exception as e:
         st.error(f"Erro: {e}")
         return False
+
 def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, nova_validade, prefixo_ignorar):
     todas_lojas = ["loja1", "loja2", "loja3"]
     for loja in todas_lojas:
@@ -227,12 +243,13 @@ def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, n
                 if novo_venda is not None: df_outra.at[idx, 'preco_venda'] = novo_venda
                 if nova_validade is not None: df_outra.at[idx, 'validade'] = nova_validade
                 salvar_na_nuvem(f"{loja}_estoque", df_outra, COLUNAS_VITAIS)
-# --- FUNÇÃO XML HÍBRIDA ---
+
+# --- FUNÇÃO XML HÍBRIDA (CORRIGIDA COM CONVERSOR) ---
 def ler_xml_nfe(arquivo_xml, df_referencia):
     tree = ET.parse(arquivo_xml); root = tree.getroot()
     def tag_limpa(element): return element.tag.split('}')[-1]
-   
-    # 1. TENTA FORMATO NOVO
+    
+    # 1. TENTA FORMATO NOVO (INFO)
     info_custom = root.find("Info")
     if info_custom is not None:
         try:
@@ -245,13 +262,17 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
         except:
             dados_nota = {'numero': 'S/N', 'fornecedor': 'IMPORTADO', 'data': datetime.now(), 'itens': []}
     else:
+        # FORMATO NFE PADRÃO
         dados_nota = {'numero': 'S/N', 'fornecedor': 'IMPORTADO', 'data': datetime.now(), 'itens': []}
         for elem in root.iter():
             tag = tag_limpa(elem)
             if tag == 'nNF': dados_nota['numero'] = elem.text
             elif tag == 'xNome' and dados_nota['fornecedor'] == 'IMPORTADO': dados_nota['fornecedor'] = elem.text
-   
-    # 2. ITENS DO XML NOVO
+            elif tag == 'dhEmi': 
+                try: dados_nota['data'] = pd.to_datetime(elem.text).date()
+                except: pass
+    
+    # 2. ITENS DO XML NOVO (CUSTOM)
     itens_custom = root.findall(".//Item")
     if itens_custom:
         for it in itens_custom:
@@ -260,19 +281,19 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
                 qtd = converter_ptbr(it.find("Quantidade").text)
                 valor = converter_ptbr(it.find("ValorPagoFinal").text)
                 ean = it.find("CodigoBarras").text
-               
+                
                 desc = 0.0
                 if it.find("ValorDesconto") is not None:
                     desc = converter_ptbr(it.find("ValorDesconto").text)
-               
+                
                 p_liq = valor / qtd if qtd > 0 else 0
                 p_bruto = (valor + desc) / qtd if qtd > 0 else 0
-               
+                
                 dados_nota['itens'].append({'nome': normalizar_texto(nome), 'qtd': qtd, 'ean': str(ean).strip(), 'preco_un_liquido': p_liq, 'preco_un_bruto': p_bruto, 'desconto_total_item': desc})
             except:
                 continue
     else:
-        # 3. ITENS NFE
+        # 3. ITENS NFE PADRÃO
         dets = [e for e in root.iter() if tag_limpa(e) == 'det']
         for det in dets:
             try:
@@ -288,32 +309,33 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
                         elif t == 'qCom': qCom = converter_ptbr(info.text)
                         elif t == 'vProd': vProd = converter_ptbr(info.text)
                         elif t == 'vDesc': vDesc = converter_ptbr(info.text)
-                   
+                    
                     if qCom > 0:
                         item['qtd'] = qCom
                         item['preco_un_bruto'] = vProd / qCom
                         item['desconto_total_item'] = vDesc
                         item['preco_un_liquido'] = (vProd - vDesc) / qCom
-                   
+                    
                     ean_xml = str(item['ean']).strip()
                     if ean_xml in ['SEM GTIN', '', 'None', 'NAN']:
                         item['ean'] = item['codigo_interno']
                     dados_nota['itens'].append(item)
             except: continue
-           
-    # MATCH
+            
+    # MATCH COM BASE OFICIAL
     lista_nomes_ref = []; dict_ref_ean = {}
     if not df_referencia.empty:
         for idx, row in df_referencia.iterrows():
             nm = normalizar_texto(row['nome do produto'])
             dict_ref_ean[nm] = str(row['código de barras']).strip()
             lista_nomes_ref.append(nm)
-   
+    
     for item in dados_nota['itens']:
         if item['ean'] in ['SEM GTIN', '', 'None', 'NAN'] and lista_nomes_ref:
             melhor, _ = encontrar_melhor_match(item['nome'], lista_nomes_ref)
             if melhor: item['ean'] = dict_ref_ean.get(melhor, item['ean'])
     return dados_nota
+
 # ==============================================================================
 # 🚀 INÍCIO DO APP
 # ==============================================================================
@@ -322,9 +344,11 @@ loja_atual = st.sidebar.selectbox("Gerenciar qual unidade?", ["Loja 1 (Principal
 st.sidebar.markdown("---")
 usar_modo_mobile = st.sidebar.checkbox("📱 Modo Celular (Cartões)", value=True, help="Melhora a visualização para iPhone/Android")
 st.sidebar.markdown("---")
+
 if loja_atual == "Loja 1 (Principal)": prefixo = "loja1"
 elif loja_atual == "Loja 2 (Filial)": prefixo = "loja2"
 else: prefixo = "loja3"
+
 # --- CARREGAMENTO INICIAL ---
 df = ler_da_nuvem(f"{prefixo}_estoque", COLUNAS_VITAIS)
 df_hist = ler_da_nuvem(f"{prefixo}_historico_compras", COLS_HIST)
@@ -332,14 +356,16 @@ df_mov = ler_da_nuvem(f"{prefixo}_movimentacoes", COLS_MOV)
 df_vendas = ler_da_nuvem(f"{prefixo}_vendas", COLS_VENDAS)
 df_lista_compras = ler_da_nuvem(f"{prefixo}_lista_compras", COLS_LISTA)
 df_oficial = ler_da_nuvem("base_oficial", COLS_OFICIAL)
+
 if not df.empty:
     df.columns = df.columns.str.strip().str.lower()
     df['código de barras'] = df['código de barras'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
     df['nome do produto'] = df['nome do produto'].apply(lambda x: normalizar_texto(str(x)))
+
 if df is not None:
     st.sidebar.title("🏪 Menu")
     modo = st.sidebar.radio("Navegar:", ["📊 Dashboard (Visão Geral)", "🚚 Transferência em Massa (Picklist)", "📝 Lista de Compras (Planejamento)", "🆕 Cadastrar Produto", "📥 Importar XML (Associação Inteligente)", "⚙️ Configurar Base Oficial", "🔄 Sincronizar (Planograma)", "📉 Baixar Vendas (Do Relatório)", "🏠 Gôndola (Loja)", "🛒 Fornecedor (Compras)", "💰 Histórico & Preços", "🏡 Estoque Central (Casa)", "📋 Tabela Geral"])
-   
+    
     # 1. DASHBOARD
     if modo == "📊 Dashboard (Visão Geral)":
         st.title(f"📊 Painel de Controle - {loja_atual}")
@@ -349,18 +375,18 @@ if df is not None:
             df_critico = df_valido[(df_valido['validade'] <= hoje + timedelta(days=5)) & ((df_valido['qtd.estoque'] > 0) | (df_valido['qtd_central'] > 0))]
             df_atencao = df_valido[(df_valido['validade'] > hoje + timedelta(days=5)) & (df_valido['validade'] <= hoje + timedelta(days=10))]
             valor_estoque = (df['qtd.estoque'] * df['preco_custo']).sum() + (df['qtd_central'] * df['preco_custo']).sum()
-           
+            
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("📦 Itens na Loja", int(df['qtd.estoque'].sum()))
             c2.metric("💰 Valor Investido", f"R$ {format_br(valor_estoque)}")
             c3.metric("🚨 Vencendo (5 dias)", len(df_critico))
             c4.metric("⚠️ Atenção (10 dias)", len(df_atencao))
             st.divider()
-           
+            
             baixo_estoque = df[(df['qtd.estoque'] + df['qtd_central']) <= df['qtd_minima']]
             if not baixo_estoque.empty: st.warning(f"🚨 Existem {len(baixo_estoque)} produtos com estoque baixo! Vá em 'Lista de Compras' para ver.")
             if not df_critico.empty: st.error("🚨 Produtos Vencendo!"); st.dataframe(df_critico[['nome do produto', 'validade', 'qtd.estoque']])
-           
+            
     # 1.5 PICKLIST
     elif modo == "🚚 Transferência em Massa (Picklist)":
         st.title(f"🚚 Transferência em Massa - {loja_atual}")
@@ -372,7 +398,7 @@ if df is not None:
                 df_pick.columns = df_pick.columns.str.strip().str.lower()
                 col_barras = next((c for c in df_pick.columns if 'barras' in c), None)
                 col_qtd = next((c for c in df_pick.columns if 'transferir' in c), None)
-               
+                
                 if not col_barras or not col_qtd: st.error("❌ Colunas 'Código de Barras' ou 'Transferir' não encontradas.")
                 else:
                     if st.button("🚀 PROCESSAR TRANSFERÊNCIA"):
@@ -380,7 +406,7 @@ if df is not None:
                         for i, row in df_pick.iterrows():
                             cod_pick = str(row[col_barras]).replace('.0', '').strip()
                             qtd_pick = converter_ptbr(row[col_qtd])
-                           
+                            
                             if qtd_pick > 0:
                                 mask = df['código de barras'] == cod_pick
                                 if mask.any():
@@ -393,15 +419,16 @@ if df is not None:
                                     movidos += 1
                                 else: erros += 1
                             bar.progress((i+1)/total_linhas)
-                       
+                        
                         salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
                         if log_movs:
                             df_mov = pd.concat([df_mov, pd.DataFrame(log_movs)], ignore_index=True)
                             salvar_na_nuvem(f"{prefixo}_movimentacoes", df_mov, COLS_MOV)
-                       
+                        
                         st.success(f"✅ {movidos} produtos transferidos!")
                         if erros > 0: st.warning(f"⚠️ {erros} não encontrados.")
             except Exception as e: st.error(f"Erro: {e}")
+
     # 1.6 LISTA DE COMPRAS
     elif modo == "📝 Lista de Compras (Planejamento)":
         st.title("📝 Planejamento de Compras")
@@ -417,12 +444,12 @@ if df is not None:
                             c1.caption(f"Qtd: {int(row['qtd_sugerida'])}")
                             c2.caption(f"Status: {row['status']}")
                 else: st.dataframe(df_lista_compras, use_container_width=True)
-               
+                
                 c_del, c_pdf = st.columns(2)
                 if c_del.button("🗑️ Limpar Lista Inteira (Após Comprar)"):
                     salvar_na_nuvem(f"{prefixo}_lista_compras", pd.DataFrame(columns=COLS_LISTA), COLS_LISTA); st.success("Lista limpa!"); st.rerun()
             else: st.info("Sua lista de compras está vazia.")
-           
+            
         with tab_add:
             st.subheader("🤖 Gerador Automático")
             if st.button("🚀 Gerar Lista Baseada no Estoque Baixo"):
@@ -439,7 +466,7 @@ if df is not None:
                                 ja_na_lista = df_lista_compras['produto'].astype(str).str.contains(row['nome do produto'], regex=False).any()
                             if not ja_na_lista:
                                 novos_itens.append({'produto': row['nome do produto'], 'qtd_sugerida': row['qtd_minima'] * 3, 'fornecedor': row['ultimo_fornecedor'], 'custo_previsto': row['preco_custo'], 'data_inclusao': datetime.now().strftime("%d/%m/%Y"), 'status': 'A Comprar'})
-                       
+                        
                         if novos_itens:
                             df_lista_compras = pd.concat([df_lista_compras, pd.DataFrame(novos_itens)], ignore_index=True)
                             salvar_na_nuvem(f"{prefixo}_lista_compras", df_lista_compras, COLS_LISTA)
@@ -461,6 +488,7 @@ if df is not None:
                         df_lista_compras = pd.concat([df_lista_compras, pd.DataFrame([novo_item])], ignore_index=True)
                         salvar_na_nuvem(f"{prefixo}_lista_compras", df_lista_compras, COLS_LISTA); st.success("Adicionado!"); st.rerun()
                     else: st.error("Selecione um produto.")
+
     # 2. CADASTRAR PRODUTO
     elif modo == "🆕 Cadastrar Produto":
         st.title(f"🆕 Cadastro - {loja_atual}")
@@ -487,6 +515,7 @@ if df is not None:
                     df = pd.concat([df, pd.DataFrame([novo])], ignore_index=True)
                     salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
                     st.success("Cadastrado!"); st.rerun()
+
     # 2.5 IMPORTAR XML
     elif modo == "📥 Importar XML (Associação Inteligente)":
         st.title(f"📥 Importar XML da Nota Fiscal")
@@ -497,18 +526,18 @@ if df is not None:
                 dados = ler_xml_nfe(arquivo_xml, df_oficial)
                 st.success(f"Nota Fiscal: **{dados['numero']}** | Fornecedor: **{dados['fornecedor']}**")
                 st.markdown("---"); st.subheader("🛠️ Conferência e Cálculo de Descontos")
-               
+                
                 lista_produtos_sistema = ["(CRIAR NOVO)"] + sorted(df['nome do produto'].astype(str).unique().tolist())
                 escolhas = {}
-               
+                
                 for i, item in enumerate(dados['itens']):
                     ean_xml = str(item.get('ean', '')).strip()
                     nome_xml = str(item['nome']).strip()
                     qtd_xml = item['qtd']
                     p_bruto = item['preco_un_bruto']; p_liq = item['preco_un_liquido']; desc_total = item.get('desconto_total_item', 0)
-                   
+                    
                     match_inicial = "(CRIAR NOVO)"; tipo_match = "Nenhum"; ean_sistema = ""
-                   
+                    
                     if not df.empty:
                         mask_ean = df['código de barras'].astype(str) == ean_xml
                         if mask_ean.any():
@@ -521,39 +550,34 @@ if df is not None:
                                 match_inicial = melhor_nome; tipo_match = tipo_encontrado
                                 mask_nome = df['nome do produto'].astype(str) == match_inicial
                                 if mask_nome.any(): ean_sistema = df.loc[mask_nome, 'código de barras'].values[0]
-                   
+                    
                     c1, c2 = st.columns([1, 1])
                     with c1:
                         st.markdown(f"📄 XML: **{nome_xml}**")
                         st.caption(f"EAN XML: `{ean_xml}` | Qtd: {int(qtd_xml)}")
-                        st.markdown(f"💰 Tabela: R$ {format_br(p_bruto)} | **Pago (Desc): R$ {format_br(p_liq)}**")
+                        st.markdown(f"💰 Tabela: {format_br(p_bruto)} | **Pago (Desc): {format_br(p_liq)}**")
+                        if desc_total > 0: st.caption(f"📉 Desconto Total na nota: {format_br(desc_total)}")
                     with c2:
                         idx_inicial = lista_produtos_sistema.index(str(match_inicial)) if str(match_inicial) in lista_produtos_sistema else 0
                         escolha_usuario = st.selectbox(f"Vincular ao Sistema ({tipo_match}):", lista_produtos_sistema, index=idx_inicial, key=f"sel_{i}")
                         if escolha_usuario != "(CRIAR NOVO)":
-                            st.info(f"🆔 Sistema: {escolha_usuario}")
+                            st.info(f"🆔 EAN no Sistema: {ean_sistema}")
                         escolhas[i] = escolha_usuario
                     st.divider()
-               
+                
                 if st.button("✅ CONFIRMAR E SALVAR ESTOQUE"):
                     novos_hist = []; criados_cont = 0; atualizados_cont = 0
-                   
+                    
                     for i, item in enumerate(dados['itens']):
                         produto_escolhido = escolhas[i]
-                        qtd_xml = int(item['qtd'])
-                        preco_pago = item['preco_un_liquido']
-                        preco_sem_desc = item['preco_un_bruto']
-                        desc_total_val = item.get('desconto_total_item', 0)
-                        ean_xml = str(item.get('ean', '')).strip()
-                        nome_xml = str(item['nome']).strip()
-                       
-                        nome_final = ""
-                       
+                        qtd_xml = int(item['qtd']); preco_pago = item['preco_un_liquido']; preco_sem_desc = item['preco_un_bruto']; desc_total_val = item.get('desconto_total_item', 0)
+                        ean_xml = str(item.get('ean', '')).strip(); nome_xml = str(item['nome']).strip()
+                        nome_final = ""; qtd_central_final = 0
+                        
                         if produto_escolhido == "(CRIAR NOVO)":
                             novo_prod = {'código de barras': ean_xml, 'nome do produto': nome_xml.upper(), 'qtd.estoque': 0, 'qtd_central': qtd_xml, 'qtd_minima': 5, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': preco_pago, 'preco_venda': preco_pago * 2, 'categoria': 'GERAL', 'ultimo_fornecedor': dados['fornecedor'], 'preco_sem_desconto': preco_sem_desc}
                             df = pd.concat([df, pd.DataFrame([novo_prod])], ignore_index=True)
-                            criados_cont += 1
-                            nome_final = nome_xml.upper()
+                            criados_cont += 1; nome_final = nome_xml.upper(); qtd_central_final = qtd_xml
                         else:
                             mask = df['nome do produto'].astype(str) == str(produto_escolhido)
                             if mask.any():
@@ -563,24 +587,20 @@ if df is not None:
                                 df.at[idx, 'preco_sem_desconto'] = preco_sem_desc
                                 df.at[idx, 'ultimo_fornecedor'] = dados['fornecedor']
                                 atualizados_cont += 1
-                                nome_final = produto_escolhido
-                       
-                        # Garante que atualiza nas outras lojas (preço e qtd central)
-                        if nome_final:
-                            atualizar_casa_global(nome_final, df.loc[df['nome do produto'] == nome_final, 'qtd_central'].values[0], preco_pago, None, None, prefixo)
-                       
+                                nome_final = produto_escolhido; qtd_central_final = df.at[idx, 'qtd_central']
+                        
+                        atualizar_casa_global(nome_final, qtd_central_final, preco_pago, None, None, prefixo)
                         novos_hist.append({'data': dados['data'], 'produto': nome_final, 'fornecedor': dados['fornecedor'], 'qtd': qtd_xml, 'preco_pago': preco_pago, 'total_gasto': qtd_xml * preco_pago, 'numero_nota': dados['numero'], 'desconto_total_money': desc_total_val, 'preco_sem_desconto': preco_sem_desc})
-                   
+                    
                     salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
-                   
                     if novos_hist:
                         df_hist = pd.concat([df_hist, pd.DataFrame(novos_hist)], ignore_index=True)
                         salvar_na_nuvem(f"{prefixo}_historico_compras", df_hist, COLS_HIST)
-                   
-                    st.success(f"✅ Processado! {criados_cont} novos, {atualizados_cont} atualizados e sincronizado.")
+                    
+                    st.success(f"✅ Processado! {criados_cont} novos, {atualizados_cont} atualizados e CASA sincronizada.")
                     st.balloons(); st.rerun()
-                   
             except Exception as e: st.error(f"Erro ao ler XML: {e}")
+
     # 2.8 BASE OFICIAL
     elif modo == "⚙️ Configurar Base Oficial":
         st.title("⚙️ Configurar Base de Produtos Oficial")
@@ -592,6 +612,7 @@ if df is not None:
                 if sucesso:
                     st.success("Base Oficial atualizada com sucesso!")
                     st.rerun()
+
     # 3. SINCRONIZAR
     elif modo == "🔄 Sincronizar (Planograma)":
         st.title(f"🔄 Sincronizar - {loja_atual}")
@@ -601,34 +622,34 @@ if df is not None:
             try:
                 if arquivo.name.endswith('.csv'): df_raw = pd.read_csv(arquivo, header=None)
                 else: df_raw = pd.read_excel(arquivo, header=None)
-               
+                
                 st.write("Identifique as colunas:")
                 st.dataframe(df_raw.head())
                 cols = df_raw.columns.tolist()
-               
+                
                 c1, c2, c3, c4 = st.columns(4)
                 idx_barras = c1.selectbox("Coluna CÓDIGO BARRAS", cols, index=0)
                 idx_nome = c2.selectbox("Coluna NOME DO PRODUTO", cols, index=1 if len(cols)>1 else 0)
                 idx_qtd = c3.selectbox("Coluna QUANTIDADE", cols, index=len(cols)-1)
-               
+                
                 opcoes_preco = ["(Não Atualizar Preço)"] + cols
                 idx_preco = c4.selectbox("Coluna PREÇO VENDA", opcoes_preco)
-               
+                
                 if st.button("🚀 SINCRONIZAR TUDO (Importar + Atualizar)"):
                     df = ler_da_nuvem(f"{prefixo}_estoque", COLUNAS_VITAIS)
                     alt = 0; novos = 0; bar = st.progress(0); total_linhas = len(df_raw); novos_produtos = []
                     start_row = 1
-                   
+                    
                     for i in range(start_row, total_linhas):
                         try:
                             cod = str(df_raw.iloc[i, idx_barras]).replace('.0', '').strip()
                             nome_planilha = str(df_raw.iloc[i, idx_nome]).strip()
-                           
+                            
                             # Usa o conversor seguro
                             qtd = converter_ptbr(df_raw.iloc[i, idx_qtd])
-                           
+                            
                             nome_norm = normalizar_texto(nome_planilha)
-                           
+                            
                             if cod and nome_norm:
                                 mask = df['código de barras'] == cod
                                 if mask.any():
@@ -641,20 +662,21 @@ if df is not None:
                                     novo_preco_venda = 0.0
                                     if idx_preco != "(Não Atualizar Preço)":
                                         novo_preco_venda = converter_ptbr(df_raw.iloc[i, idx_preco])
-                                   
+                                    
                                     novo_prod = {'código de barras': cod, 'nome do produto': nome_norm, 'qtd.estoque': qtd, 'qtd_central': 0, 'qtd_minima': 5, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': 0.0, 'preco_venda': novo_preco_venda, 'categoria': 'GERAL', 'ultimo_fornecedor': '', 'preco_sem_desconto': 0.0}
                                     novos_produtos.append(novo_prod)
                                     novos += 1
                         except: pass
                         bar.progress((i+1)/total_linhas)
-                   
+                    
                     if novos_produtos:
                         df = pd.concat([df, pd.DataFrame(novos_produtos)], ignore_index=True)
-                   
+                    
                     salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
                     st.success(f"✅ Sucesso! {alt} produtos atualizados e {novos} NOVOS produtos cadastrados.")
                     if novos > 0: st.balloons()
             except Exception as e: st.error(f"Erro: {e}")
+
     # 4. BAIXAR VENDAS
     elif modo == "📉 Baixar Vendas (Do Relatório)":
         st.title(f"📉 Importar Vendas - {loja_atual}")
@@ -669,26 +691,26 @@ if df is not None:
                     arquivo_vendas.seek(0)
                     df_vendas_temp = pd.read_excel(arquivo_vendas, header=linha_titulo)
                     cols = df_vendas_temp.columns.tolist()
-                   
+                    
                     c1, c2, c3 = st.columns(3)
                     col_nome = c1.selectbox("Coluna NOME?", cols)
                     col_qtd = c2.selectbox("Coluna QUANTIDADE?", cols)
                     col_data = c3.selectbox("Coluna DATA?", cols)
-                   
+                    
                     if st.button("🚀 PROCESSAR VENDAS"):
                         if not df.empty:
                             atualizados = 0; novos_registros = []; bar = st.progress(0); total = len(df_vendas_temp)
                             for i, row in df_vendas_temp.iterrows():
                                 nome = str(row[col_nome]).strip()
                                 qtd = converter_ptbr(row[col_qtd])
-                               
+                                
                                 try:
                                     dt_v = pd.to_datetime(row[col_data], dayfirst=True)
                                     if pd.isna(dt_v): dt_v = datetime.now()
                                 except: dt_v = datetime.now()
-                               
+                                
                                 if pd.isna(qtd) or qtd <= 0: continue
-                               
+                                
                                 mask = (df['código de barras'].astype(str).str.contains(nome, na=False) | df['nome do produto'].astype(str).str.contains(nome, case=False, na=False))
                                 if mask.any():
                                     idx = df[mask].index[0]
@@ -697,7 +719,7 @@ if df is not None:
                                     atualizados += 1
                                     novos_registros.append({"data_hora": dt_v, "produto": df.at[idx, 'nome do produto'], "qtd_vendida": qtd, "estoque_restante": df.at[idx, 'qtd.estoque']})
                                 bar.progress((i+1)/total)
-                           
+                            
                             salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
                             if novos_registros:
                                 df_vendas = pd.concat([df_vendas, pd.DataFrame(novos_registros)], ignore_index=True)
@@ -710,6 +732,7 @@ if df is not None:
                 df_v_show = filtrar_dados_inteligente(df_vendas, 'produto', busca_vendas_hist)
                 if 'data_hora' in df_v_show.columns:
                     st.dataframe(df_v_show.sort_values(by="data_hora", ascending=False), use_container_width=True, hide_index=True)
+
     # 5. GÔNDOLA
     elif modo == "🏠 Gôndola (Loja)":
         st.title(f"🏠 Gôndola - {loja_atual}")
@@ -753,7 +776,7 @@ if df is not None:
                         val = df.at[idx, 'validade']
                         c3.write(f"Validade: {val.strftime('%d/%m/%Y') if pd.notnull(val) else 'Sem data'}")
                         st.divider()
-                       
+                        
                         if df.at[idx, 'qtd_central'] > 0:
                             st.subheader("🚚 Transferência (Casa -> Loja)")
                             with st.form("form_transf_gondola"):
@@ -767,14 +790,14 @@ if df is not None:
                                         df.at[idx, 'qtd_central'] -= qtd_transf
                                         salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
                                         atualizar_casa_global(nome_prod, df.at[idx, 'qtd_central'], None, None, None, prefixo)
-                                       
+                                        
                                         data_final = datetime.combine(dt_transf, hr_transf)
                                         novo_mov = {'data_hora': data_final, 'produto': nome_prod, 'qtd_movida': qtd_transf}
                                         df_mov = pd.concat([df_mov, pd.DataFrame([novo_mov])], ignore_index=True)
                                         salvar_na_nuvem(f"{prefixo}_movimentacoes", df_mov, COLS_MOV)
                                         st.success(f"Sucesso! {qtd_transf} unid. transferidas."); st.rerun()
                                     else: st.info("Quantidade deve ser maior que 0.")
-                       
+                        
                         st.divider()
                         with st.expander("🛠️ Ajustes Manuais (Completo)"):
                             st.warning("⚠️ Edições aqui atualizam o cadastro geral!")
@@ -786,7 +809,7 @@ if df is not None:
                             c1, c2 = st.columns(2)
                             n_qtd_loja = c1.number_input("Qtd Real Loja:", value=int(df.at[idx, 'qtd.estoque']))
                             n_val = c2.date_input("Nova Validade:", value=val if pd.notnull(val) else None)
-                           
+                            
                             if st.button("💾 SALVAR CORREÇÕES"):
                                 df.at[idx, 'nome do produto'] = c_nome.upper().strip()
                                 df.at[idx, 'ultimo_fornecedor'] = c_forn.strip()
@@ -803,6 +826,7 @@ if df is not None:
                         if not df_mov_show.empty:
                             st.dataframe(df_mov_show.sort_values(by='data_hora', ascending=False), use_container_width=True, hide_index=True)
                     else: st.info("Sem histórico.")
+
     # 6. FORNECEDOR
     elif modo == "🛒 Fornecedor (Compras)":
         st.title(f"🛒 Compras - {loja_atual}")
@@ -822,7 +846,7 @@ if df is not None:
                     qtd = c1.number_input("Qtd Chegada:", value=int(df.at[idx, 'qtd_comprada']))
                     custo = c2.number_input("Preço Pago (UN):", value=float(df.at[idx, 'preco_custo']), format="%.2f")
                     venda = c3.number_input("Novo Preço Venda:", value=float(df.at[idx, 'preco_venda']), format="%.2f")
-                   
+                    
                     if st.form_submit_button("✅ ENTRAR NO ESTOQUE"):
                         df.at[idx, 'qtd_central'] += qtd
                         df.at[idx, 'preco_custo'] = custo
@@ -832,13 +856,14 @@ if df is not None:
                         df.at[idx, 'ultimo_fornecedor'] = forn_compra
                         salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
                         atualizar_casa_global(item, df.at[idx, 'qtd_central'], custo, venda, None, prefixo)
-                       
+                        
                         dt_full = datetime.combine(dt_compra, hr_compra)
                         hist = {'data': dt_full, 'produto': item, 'fornecedor': forn_compra, 'qtd': qtd, 'preco_pago': custo, 'total_gasto': qtd*custo}
                         df_hist = pd.concat([df_hist, pd.DataFrame([hist])], ignore_index=True)
                         salvar_na_nuvem(f"{prefixo}_historico_compras", df_hist, COLS_HIST)
                         st.success("Estoque atualizado!"); st.rerun()
         else: st.success("Sem compras pendentes.")
+
     # 7. HISTÓRICO & PREÇOS
     elif modo == "💰 Histórico & Preços":
         st.title("💰 Histórico & Preços")
@@ -849,7 +874,7 @@ if df is not None:
                 df_hist_visual = filtrar_dados_inteligente(df_hist, 'produto', busca_hist_precos)
                 if df_hist_visual.empty:
                     df_hist_visual = filtrar_dados_inteligente(df_hist, 'fornecedor', busca_hist_precos)
-           
+            
             st.info("✅ Edite ou **exclua** linhas (selecione a linha e aperte Delete).")
             df_editado = st.data_editor(
                 df_hist_visual.sort_values(by='data', ascending=False),
@@ -880,10 +905,11 @@ if df is not None:
                             df_hist.at[idx, 'preco_pago'] = total_liq / q
                             df_hist.at[idx, 'total_gasto'] = total_liq
                     except: pass
-               
+                
                 salvar_na_nuvem(f"{prefixo}_historico_compras", df_hist, COLS_HIST)
                 st.success("Salvo!"); st.rerun()
         else: st.info("Sem histórico.")
+
     # 8. ESTOQUE CENTRAL
     elif modo == "🏡 Estoque Central (Casa)":
         st.title(f"🏡 Estoque Central (Casa) - {loja_atual}")
@@ -912,7 +938,7 @@ if df is not None:
                     colunas_visiveis = ['nome do produto', 'qtd_central', 'validade', 'preco_custo', 'ultimo_fornecedor']
                     df_visual = filtrar_dados_inteligente(df, 'nome do produto', busca_central)[colunas_visiveis]
                     df_editado = st.data_editor(df_visual, use_container_width=True, num_rows="dynamic", key="edit_casa")
-                   
+                    
                     if st.button("💾 SALVAR TABELA"):
                         indices_originais = df_visual.index.tolist()
                         indices_editados = df_editado.index.tolist()
@@ -921,7 +947,7 @@ if df is not None:
                             df = df.drop(indices_removidos)
                         df.update(df_editado)
                         salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
-                       
+                        
                         bar = st.progress(0); total = len(df_editado)
                         for i, (idx, row) in enumerate(df_editado.iterrows()):
                             atualizar_casa_global(df.at[idx, 'nome do produto'], row['qtd_central'], row['preco_custo'], None, row['validade'], prefixo)
@@ -942,24 +968,24 @@ if df is not None:
                             dt_reg = c_dt.date_input("Data:", datetime.today())
                             hr_reg = c_hr.time_input("Hora:", datetime.now().time())
                             c_forn = st.text_input("Fornecedor:", value=str(df.at[idx_prod, 'ultimo_fornecedor']))
-                           
+                            
                             c_nome = st.text_input("Nome:", value=df.at[idx_prod, 'nome do produto'])
                             c_val, c_custo, c_venda = st.columns(3)
                             nova_val = c_val.date_input("Validade:", value=df.at[idx_prod, 'validade'] if pd.notnull(df.at[idx_prod, 'validade']) else None)
                             novo_custo = c_custo.number_input("Custo:", value=float(df.at[idx_prod, 'preco_custo']), format="%.2f")
                             novo_venda = c_venda.number_input("Venda:", value=float(df.at[idx_prod, 'preco_venda']), format="%.2f")
-                           
+                            
                             c_qtd, c_acao = st.columns([1, 2])
                             qtd_input = c_qtd.number_input("Quantidade:", min_value=0, value=0)
                             acao = c_acao.radio("Ação:", ["Somar (+) Entrada", "Substituir (=) Correção", "Apenas Salvar Dados"], index=2)
-                           
+                            
                             if st.form_submit_button("💾 SALVAR"):
                                 df.at[idx_prod, 'nome do produto'] = c_nome.upper().strip()
                                 df.at[idx_prod, 'validade'] = pd.to_datetime(nova_val) if nova_val else None
                                 df.at[idx_prod, 'preco_custo'] = novo_custo
                                 df.at[idx_prod, 'preco_venda'] = novo_venda
                                 if c_forn: df.at[idx_prod, 'ultimo_fornecedor'] = c_forn
-                               
+                                
                                 if acao.startswith("Somar") and qtd_input > 0:
                                     df.at[idx_prod, 'qtd_central'] += qtd_input
                                     dt_full = datetime.combine(dt_reg, hr_reg)
@@ -968,10 +994,11 @@ if df is not None:
                                     salvar_na_nuvem(f"{prefixo}_historico_compras", df_hist, COLS_HIST)
                                 elif acao.startswith("Substituir"):
                                     df.at[idx_prod, 'qtd_central'] = qtd_input
-                               
+                                
                                 salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
                                 atualizar_casa_global(c_nome.upper().strip(), df.at[idx_prod, 'qtd_central'], novo_custo, novo_venda, pd.to_datetime(nova_val) if nova_val else None, prefixo)
                                 st.success("Salvo!"); st.rerun()
+
     # 9. GERAL
     elif modo == "📋 Tabela Geral":
         st.title("📋 Visão Geral (Editável)")
@@ -980,7 +1007,7 @@ if df is not None:
             busca_geral = st.text_input("🔍 Buscar:", placeholder="Ex: oleo...", key="busca_geral")
             df_visual_geral = filtrar_dados_inteligente(df, 'nome do produto', busca_geral)
             df_edit = st.data_editor(df_visual_geral, use_container_width=True, num_rows="dynamic", key="geral_editor")
-           
+            
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("💾 SALVAR ALTERAÇÕES GERAIS"):
@@ -991,7 +1018,7 @@ if df is not None:
                         df = df.drop(indices_removidos)
                     df.update(df_edit)
                     salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
-                   
+                    
                     bar = st.progress(0); total = len(df_edit)
                     for i, (idx, row) in enumerate(df_edit.iterrows()):
                         atualizar_casa_global(df.at[idx, 'nome do produto'], row['qtd_central'], row['preco_custo'], row['preco_venda'], row['validade'], prefixo)
@@ -1007,4 +1034,3 @@ if df is not None:
                     salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
                     st.success(f"✅ {qtd_antes - qtd_depois} produtos duplicados foram unidos.")
                     st.balloons(); st.rerun()
-
