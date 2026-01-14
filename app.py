@@ -36,21 +36,21 @@ def get_google_client():
 
 # --- FUNÇÃO DE LIMPEZA E CONVERSÃO DE NÚMEROS (CORREÇÃO 3,19 -> 3.19) ---
 def converter_ptbr(valor):
-    """Converte valores brasileiros (com vírgula) para padrão computador (ponto) sem erros."""
+    """Converte valores brasileiros (com vírgula) para float de forma robusta."""
     if pd.isna(valor) or str(valor).strip() == "":
         return 0.0
     
-    # Remove R$, espaços e converte para maiúsculo
+    # Remove R$, espaços e converte para string maiúscula
     s = str(valor).strip().upper().replace('R$', '').replace(' ', '')
     
     try:
-        # Se tem ponto e vírgula (ex: 1.000,00) -> remove ponto, troca virgula por ponto
+        # Lógica para 1.000,00 -> remove ponto, troca virgula por ponto
         if ',' in s and '.' in s:
             s = s.replace('.', '').replace(',', '.')
-        # Se só tem vírgula (ex: 3,19) -> troca virgula por ponto
+        # Lógica para 3,19 -> troca virgula por ponto
         elif ',' in s:
             s = s.replace(',', '.')
-        # Se só tem ponto (ex: 3.19 ou 1000) -> deixa como está
+        # Se for 1000 ou 3.19, já está ok
         
         return float(s)
     except:
@@ -80,15 +80,15 @@ def garantir_integridade_colunas(df, colunas_alvo):
             else: 
                 df[col] = ""
     
-    # Garante que colunas numéricas sejam números de verdade (CORREÇÃO IMPORTANTE)
+    # Garante que colunas numéricas sejam números de verdade (CORREÇÃO APLICADA AQUI)
     for col in df.columns:
         if any(x in col for x in ['qtd', 'preco', 'valor', 'custo', 'total', 'desconto']):
-            # Aplica o conversor linha a linha para garantir
+            # Aplica o conversor linha a linha
             df[col] = df[col].apply(converter_ptbr)
             
     return df
 
-# --- LEITURA DA NUVEM (CORRIGIDA) ---
+# --- LEITURA DA NUVEM (COM TRATAMENTO DE ERROS) ---
 @st.cache_data(ttl=60)
 def ler_da_nuvem(nome_aba, colunas_padrao):
     time.sleep(1) # Pausa técnica
@@ -117,13 +117,14 @@ def ler_da_nuvem(nome_aba, colunas_padrao):
                 
         return df
     except Exception as e: 
+        # Em caso de erro, retorna estrutura vazia mas não crasha
         return pd.DataFrame(columns=colunas_padrao)
 
-# --- SALVAR NA NUVEM (COM TRAVA DE SEGURANÇA ANTI-APAGAR) ---
+# --- SALVAR NA NUVEM (COM TRAVA DE SEGURANÇA) ---
 def salvar_na_nuvem(nome_aba, df, colunas_padrao):
-    # TRAVA DE SEGURANÇA: Se o DF estiver vazio e for uma aba de estoque, aborta para não apagar dados!
+    # TRAVA DE SEGURANÇA: Se o DF estiver vazio e for uma aba de estoque ou histórico, aborta!
     if df.empty and ("estoque" in nome_aba or "historico" in nome_aba):
-        st.error("⚠️ ALERTA DE SEGURANÇA: O sistema impediu que seus dados fossem apagados devido a um erro de leitura. Tente novamente.")
+        st.error("⚠️ ERRO DE SEGURANÇA: O sistema detectou uma lista vazia e impediu a exclusão dos seus dados na nuvem. Verifique a importação.")
         return
 
     try:
@@ -137,6 +138,7 @@ def salvar_na_nuvem(nome_aba, df, colunas_padrao):
         # Prepara cópia para salvar
         df_save = garantir_integridade_colunas(df.copy(), colunas_padrao)
         
+        # Converte datas para string para o Google Sheets aceitar
         for col in df_save.columns:
             if pd.api.types.is_datetime64_any_dtype(df_save[col]):
                 df_save[col] = df_save[col].dt.strftime('%Y-%m-%d').replace('NaT', '')
@@ -229,6 +231,7 @@ def processar_excel_oficial(arquivo_subido):
         return False
 
 def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, nova_validade, prefixo_ignorar):
+    """Função que replica as informações para todas as lojas"""
     todas_lojas = ["loja1", "loja2", "loja3"]
     for loja in todas_lojas:
         if loja == prefixo_ignorar: continue
@@ -244,12 +247,12 @@ def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, n
                 if nova_validade is not None: df_outra.at[idx, 'validade'] = nova_validade
                 salvar_na_nuvem(f"{loja}_estoque", df_outra, COLUNAS_VITAIS)
 
-# --- FUNÇÃO XML HÍBRIDA (CORRIGIDA COM CONVERSOR) ---
+# --- FUNÇÃO XML HÍBRIDA ---
 def ler_xml_nfe(arquivo_xml, df_referencia):
     tree = ET.parse(arquivo_xml); root = tree.getroot()
     def tag_limpa(element): return element.tag.split('}')[-1]
     
-    # 1. TENTA FORMATO NOVO (INFO)
+    # 1. TENTA FORMATO NOVO
     info_custom = root.find("Info")
     if info_custom is not None:
         try:
@@ -262,17 +265,13 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
         except:
             dados_nota = {'numero': 'S/N', 'fornecedor': 'IMPORTADO', 'data': datetime.now(), 'itens': []}
     else:
-        # FORMATO NFE PADRÃO
         dados_nota = {'numero': 'S/N', 'fornecedor': 'IMPORTADO', 'data': datetime.now(), 'itens': []}
         for elem in root.iter():
             tag = tag_limpa(elem)
             if tag == 'nNF': dados_nota['numero'] = elem.text
             elif tag == 'xNome' and dados_nota['fornecedor'] == 'IMPORTADO': dados_nota['fornecedor'] = elem.text
-            elif tag == 'dhEmi': 
-                try: dados_nota['data'] = pd.to_datetime(elem.text).date()
-                except: pass
     
-    # 2. ITENS DO XML NOVO (CUSTOM)
+    # 2. ITENS DO XML NOVO
     itens_custom = root.findall(".//Item")
     if itens_custom:
         for it in itens_custom:
@@ -293,7 +292,7 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
             except:
                 continue
     else:
-        # 3. ITENS NFE PADRÃO
+        # 3. ITENS NFE
         dets = [e for e in root.iter() if tag_limpa(e) == 'det']
         for det in dets:
             try:
@@ -322,7 +321,7 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
                     dados_nota['itens'].append(item)
             except: continue
             
-    # MATCH COM BASE OFICIAL
+    # MATCH
     lista_nomes_ref = []; dict_ref_ean = {}
     if not df_referencia.empty:
         for idx, row in df_referencia.iterrows():
@@ -556,12 +555,11 @@ if df is not None:
                         st.markdown(f"📄 XML: **{nome_xml}**")
                         st.caption(f"EAN XML: `{ean_xml}` | Qtd: {int(qtd_xml)}")
                         st.markdown(f"💰 Tabela: {format_br(p_bruto)} | **Pago (Desc): {format_br(p_liq)}**")
-                        if desc_total > 0: st.caption(f"📉 Desconto Total na nota: {format_br(desc_total)}")
                     with c2:
                         idx_inicial = lista_produtos_sistema.index(str(match_inicial)) if str(match_inicial) in lista_produtos_sistema else 0
                         escolha_usuario = st.selectbox(f"Vincular ao Sistema ({tipo_match}):", lista_produtos_sistema, index=idx_inicial, key=f"sel_{i}")
                         if escolha_usuario != "(CRIAR NOVO)":
-                            st.info(f"🆔 EAN no Sistema: {ean_sistema}")
+                            st.info(f"🆔 Sistema: {escolha_usuario}")
                         escolhas[i] = escolha_usuario
                     st.divider()
                 
@@ -867,13 +865,52 @@ if df is not None:
     # 7. HISTÓRICO & PREÇOS
     elif modo == "💰 Histórico & Preços":
         st.title("💰 Histórico & Preços")
+        
+        # --- BOTÃO MÁGICO PARA FORÇAR CORREÇÃO E ATUALIZAÇÃO ---
+        st.markdown("### 🛠️ Ferramentas de Correção")
+        if st.button("🔄 FORÇAR ATUALIZAÇÃO GERAL (Corrige vírgulas e atualiza menus)"):
+            if not df_hist.empty:
+                # 1. Corrige valores no histórico
+                for col in ['preco_pago', 'total_gasto', 'desconto_total_money', 'preco_sem_desconto']:
+                    if col in df_hist.columns:
+                        df_hist[col] = df_hist[col].apply(converter_ptbr)
+                salvar_na_nuvem(f"{prefixo}_historico_compras", df_hist, COLS_HIST)
+                
+                # 2. Atualiza tabela geral com base no último preço do histórico
+                for idx, row in df_hist.iterrows():
+                    nm = row['produto']
+                    pc = row['preco_pago']
+                    # Encontra na tabela geral e atualiza
+                    mask = df['nome do produto'] == nm
+                    if mask.any():
+                        idx_geral = df[mask].index[0]
+                        df.at[idx_geral, 'preco_custo'] = pc
+                        df.at[idx_geral, 'ultimo_fornecedor'] = row['fornecedor']
+                        # Propaga para as outras lojas
+                        atualizar_casa_global(nm, df.at[idx_geral, 'qtd_central'], pc, None, None, prefixo)
+                
+                salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
+                st.success("✅ Tudo corrigido e sincronizado! Verifique a Gôndola e Tabela Geral.")
+                time.sleep(2)
+                st.rerun()
+            else:
+                st.warning("Histórico vazio.")
+        
+        st.divider()
+
         if not df_hist.empty:
             busca_hist_precos = st.text_input("🔍 Buscar:", placeholder="Digite o nome, fornecedor...", key="busca_hist_precos")
-            df_hist_visual = df_hist
+            df_hist_visual = df_hist.copy()
+            
+            # Aplica formatação visual apenas para exibir (não altera os dados reais)
+            for col in ['preco_sem_desconto', 'desconto_total_money', 'preco_pago', 'total_gasto']:
+                if col in df_hist_visual.columns:
+                    df_hist_visual[col] = df_hist_visual[col].apply(converter_ptbr)
+
             if busca_hist_precos:
-                df_hist_visual = filtrar_dados_inteligente(df_hist, 'produto', busca_hist_precos)
+                df_hist_visual = filtrar_dados_inteligente(df_hist_visual, 'produto', busca_hist_precos)
                 if df_hist_visual.empty:
-                    df_hist_visual = filtrar_dados_inteligente(df_hist, 'fornecedor', busca_hist_precos)
+                    df_hist_visual = filtrar_dados_inteligente(df_hist_visual, 'fornecedor', busca_hist_precos)
             
             st.info("✅ Edite ou **exclua** linhas (selecione a linha e aperte Delete).")
             df_editado = st.data_editor(
@@ -895,11 +932,17 @@ if df is not None:
                 if indices_removidos:
                     df_hist = df_hist.drop(indices_removidos)
                     st.warning(f"🗑️ {len(indices_removidos)} registros excluídos.")
+                
+                # Atualiza os dados reais com os editados
                 df_hist.update(df_editado)
-                # Recalcula totais
+                
+                # Recalcula totais matematicamente
                 for idx, row in df_hist.iterrows():
                     try:
-                        q = converter_ptbr(row.get('qtd', 0)); p_tab = converter_ptbr(row.get('preco_sem_desconto', 0)); d_tot = converter_ptbr(row.get('desconto_total_money', 0))
+                        q = converter_ptbr(row.get('qtd', 0))
+                        p_tab = converter_ptbr(row.get('preco_sem_desconto', 0))
+                        d_tot = converter_ptbr(row.get('desconto_total_money', 0))
+                        
                         if q > 0 and p_tab > 0:
                             total_liq = (p_tab * q) - d_tot
                             df_hist.at[idx, 'preco_pago'] = total_liq / q
