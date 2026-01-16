@@ -45,23 +45,52 @@ def get_google_client():
 def converter_ptbr(valor):
     """
     Converte valores mantendo a precisão decimal.
-    Não remove o ponto se ele for o único separador (ex: 7.99 permanece 7.99).
+    Corrige casos que viravam 799 ao invés de 7.99.
+
+    Regras:
+      - Se tiver vírgula: assume padrão BR (remove milhar '.' e troca ',' por '.')
+      - Se não tiver vírgula: assume padrão internacional (mantém '.' como decimal)
+      - Se tiver ambos (1,234.56 ou 1.234,56), decide pelo separador que aparece por último
+      - Remove lixo (R$, espaços, etc.) com regex
     """
-    if pd.isna(valor) or str(valor).strip() == "":
+    if valor is None:
         return 0.0
-    
+
+    try:
+        if pd.isna(valor) or str(valor).strip() == "":
+            return 0.0
+    except:
+        pass
+
     if isinstance(valor, (float, int)):
         return float(valor)
-    
+
     s = str(valor).strip().upper().replace('R$', '').strip()
-    
+    # mantém apenas dígitos, ponto, vírgula e sinal
+    s = re.sub(r"[^\d\.,\-]", "", s)
+
+    if s in {"", "-", ".", ","}:
+        return 0.0
+
     try:
-        # Se tiver vírgula, assume padrão BR (1.000,00 ou 1,99)
-        if ',' in s:
-            s = s.replace('.', '') # Remove milhar
-            s = s.replace(',', '.') # Vírgula vira ponto decimal
-        # Se NÃO tiver vírgula, assume padrão internacional (7.99) e NÃO mexe nos pontos
-        
+        # Caso com ponto e vírgula: decimal é o separador que aparece por último
+        if "," in s and "." in s:
+            if s.rfind(",") > s.rfind("."):
+                # 1.234,56 -> 1234.56
+                s = s.replace(".", "")
+                s = s.replace(",", ".")
+            else:
+                # 1,234.56 -> 1234.56
+                s = s.replace(",", "")
+
+        # Se tiver vírgula e não tiver ponto: 7,99 -> 7.99
+        elif "," in s:
+            s = s.replace(".", "")   # segurança: remove qualquer ponto perdido
+            s = s.replace(",", ".")
+
+        # Se NÃO tiver vírgula: padrão internacional (7.99). Não remove ponto.
+        # (mantém como está)
+
         return float(s)
     except:
         return 0.0
@@ -74,10 +103,10 @@ def format_br(valor):
 # --- FUNÇÃO DE CURA ---
 def garantir_integridade_colunas(df, colunas_alvo):
     if df.empty: return pd.DataFrame(columns=colunas_alvo)
-    
+
     # Normaliza nomes das colunas
     df.columns = df.columns.str.strip().str.lower()
-    
+
     # Garante que todas as colunas vitais existem
     for col in colunas_alvo:
         if col not in df.columns:
@@ -87,12 +116,12 @@ def garantir_integridade_colunas(df, colunas_alvo):
                 df[col] = None
             else:
                 df[col] = ""
-    
+
     # Garante que colunas numéricas sejam números de verdade
     for col in df.columns:
         if any(x in col for x in ['qtd', 'preco', 'valor', 'custo', 'total', 'desconto']):
             df[col] = df[col].apply(converter_ptbr)
-            
+
     return df
 
 # --- LEITURA DA NUVEM ---
@@ -108,19 +137,19 @@ def ler_da_nuvem(nome_aba, colunas_padrao):
             ws = sh.add_worksheet(title=nome_aba, rows=2000, cols=20)
             ws.append_row(colunas_padrao)
             return pd.DataFrame(columns=colunas_padrao)
-        
+
         dados = ws.get_all_records()
         df = pd.DataFrame(dados)
-        
+
         if df.empty:
             return pd.DataFrame(columns=colunas_padrao)
         df = garantir_integridade_colunas(df, colunas_padrao)
-        
+
         # Tratamento especial para Datas
         for col in df.columns:
             if 'data' in col or 'validade' in col:
                 df[col] = pd.to_datetime(df[col], errors='coerce')
-                
+
         return df
     except Exception as e:
         return pd.DataFrame(columns=colunas_padrao)
@@ -130,12 +159,14 @@ def salvar_na_nuvem(nome_aba, df, colunas_padrao):
     try:
         client = get_google_client()
         sh = client.open("loja_dados")
-        try: ws = sh.worksheet(nome_aba)
-        except: ws = sh.add_worksheet(title=nome_aba, rows=2000, cols=20)
-        
+        try:
+            ws = sh.worksheet(nome_aba)
+        except:
+            ws = sh.add_worksheet(title=nome_aba, rows=2000, cols=20)
+
         # Prepara cópia para salvar
         df_save = garantir_integridade_colunas(df.copy(), colunas_padrao)
-        
+
         for col in df_save.columns:
             if pd.api.types.is_datetime64_any_dtype(df_save[col]):
                 if 'validade' in col.lower():
@@ -143,13 +174,17 @@ def salvar_na_nuvem(nome_aba, df, colunas_padrao):
                 else:
                     # Salva HORA completa para históricos
                     df_save[col] = df_save[col].dt.strftime('%Y-%m-%d %H:%M:%S')
-        
-        # Proteção contra NaN (erro JSON)
-        df_save = df_save.fillna("")
-        
+
+        # CORREÇÃO: não usar fillna("") global (isso pode converter número em texto)
+        for col in df_save.columns:
+            if pd.api.types.is_numeric_dtype(df_save[col]):
+                df_save[col] = df_save[col].fillna(0.0)
+            else:
+                df_save[col] = df_save[col].fillna("")
+
         ws.clear()
         ws.update([df_save.columns.values.tolist()] + df_save.values.tolist())
-        ler_da_nuvem.clear() 
+        ler_da_nuvem.clear()
     except Exception as e:
         st.error(f"Erro ao salvar (Seus dados NÃO foram apagados): {e}")
 
@@ -192,13 +227,13 @@ def encontrar_melhor_match(nome_buscado, lista_opcoes, cutoff=0.3):
 def unificar_produtos_por_codigo(df):
     if df.empty: return df
     df = garantir_integridade_colunas(df, COLUNAS_VITAIS)
-    
+
     lista_final = []
     df['código de barras'] = df['código de barras'].astype(str).str.strip()
-    
+
     sem_codigo = df[df['código de barras'] == ""]
     com_codigo = df[df['código de barras'] != ""]
-    
+
     for cod, grupo in com_codigo.groupby('código de barras'):
         if len(grupo) > 1:
             melhor_nome = max(grupo['nome do produto'].tolist(), key=len)
@@ -208,27 +243,29 @@ def unificar_produtos_por_codigo(df):
             base_ref['preco_custo'] = grupo['preco_custo'].max()
             base_ref['preco_venda'] = grupo['preco_venda'].max()
             lista_final.append(base_ref)
-        else: lista_final.append(grupo.iloc[0].to_dict())
-        
+        else:
+            lista_final.append(grupo.iloc[0].to_dict())
+
     df_novo = pd.DataFrame(lista_final)
-    if not sem_codigo.empty: df_novo = pd.concat([df_novo, sem_codigo], ignore_index=True)
+    if not sem_codigo.empty:
+        df_novo = pd.concat([df_novo, sem_codigo], ignore_index=True)
     return df_novo
 
 def processar_excel_oficial(arquivo_subido):
     try:
         if arquivo_subido.name.endswith('.csv'): df_temp = pd.read_csv(arquivo_subido)
         else: df_temp = pd.read_excel(arquivo_subido)
-        
+
         if 'obrigatório' in str(df_temp.iloc[0].values): df_temp = df_temp.iloc[1:].reset_index(drop=True)
         df_temp.columns = df_temp.columns.str.strip()
         col_nome = next((c for c in df_temp.columns if 'nome' in c.lower()), 'Nome')
         col_cod = next((c for c in df_temp.columns if 'código' in c.lower() or 'barras' in c.lower()), 'Código de Barras Primário')
-        
+
         df_limpo = df_temp[[col_nome, col_cod]].copy()
         df_limpo.columns = ['nome do produto', 'código de barras']
         df_limpo['nome do produto'] = df_limpo['nome do produto'].apply(normalizar_texto)
         df_limpo['código de barras'] = df_limpo['código de barras'].astype(str).str.replace('.0', '', regex=False).str.strip()
-        
+
         salvar_na_nuvem("base_oficial", df_limpo, COLS_OFICIAL)
         return True
     except Exception as e:
@@ -255,10 +292,10 @@ def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, n
 def ler_xml_nfe(arquivo_xml, df_referencia):
     tree = ET.parse(arquivo_xml); root = tree.getroot()
     def tag_limpa(element): return element.tag.split('}')[-1]
-    
+
     # IMPORTANTE: Hora da importação = Hora do Amazonas
     agora = agora_am()
-    
+
     info_custom = root.find("Info")
     if info_custom is not None:
         try:
@@ -276,7 +313,7 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
             tag = tag_limpa(elem)
             if tag == 'nNF': dados_nota['numero'] = elem.text
             elif tag == 'xNome' and dados_nota['fornecedor'] == 'IMPORTADO': dados_nota['fornecedor'] = elem.text
-    
+
     itens_custom = root.findall(".//Item")
     if itens_custom:
         for it in itens_custom:
@@ -316,7 +353,7 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
                     if ean_xml in ['SEM GTIN', '', 'None', 'NAN']: item['ean'] = item['codigo_interno']
                     dados_nota['itens'].append(item)
             except: continue
-            
+
     lista_nomes_ref = []; dict_ref_ean = {}
     if not df_referencia.empty:
         for idx, row in df_referencia.iterrows():
@@ -587,17 +624,13 @@ if df is not None:
                                 atualizados_cont += 1
                                 nome_final = produto_escolhido
                         
-                        # Garante que atualiza nas outras lojas (preço e qtd central)
                         if nome_final:
-                            # AQUI: Chamada crucial para sincronizar os dados novos nas outras tabelas
                             atualizar_casa_global(nome_final, df.loc[df['nome do produto'] == nome_final, 'qtd_central'].values[0], preco_pago, None, None, prefixo)
                         
                         novos_hist.append({'data': dados['data'], 'produto': nome_final, 'fornecedor': dados['fornecedor'], 'qtd': qtd_xml, 'preco_pago': preco_pago, 'total_gasto': qtd_xml * preco_pago, 'numero_nota': dados['numero'], 'desconto_total_money': desc_total_val, 'preco_sem_desconto': preco_sem_desc})
                     
-                    # Salva Tabela Atual
                     salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
                     
-                    # Salva Histórico
                     if novos_hist:
                         df_hist = pd.concat([df_hist, pd.DataFrame(novos_hist)], ignore_index=True)
                         salvar_na_nuvem(f"{prefixo}_historico_compras", df_hist, COLS_HIST)
@@ -878,7 +911,6 @@ if df is not None:
                     df_hist_visual = filtrar_dados_inteligente(df_hist, 'fornecedor', busca_hist_precos)
             
             st.info("✅ Edite ou **exclua** linhas (selecione a linha e aperte Delete).")
-            # Configuração do Editor para evitar erros de digitação
             df_editado = st.data_editor(
                 df_hist_visual.sort_values(by='data', ascending=False),
                 use_container_width=True,
@@ -904,10 +936,8 @@ if df is not None:
                     
                     df_hist.update(df_editado)
                     
-                    # Recalcula totais com segurança
                     for idx, row in df_hist.iterrows():
                         try:
-                            # Usa conversor seguro
                             q = converter_ptbr(row.get('qtd', 0))
                             p_tab = converter_ptbr(row.get('preco_sem_desconto', 0))
                             d_tot = converter_ptbr(row.get('desconto_total_money', 0))
@@ -939,7 +969,6 @@ if df is not None:
                             st.write(f"**{row['nome do produto']}**")
                             col1, col2 = st.columns(2)
                             nova_qtd = col1.number_input(f"Qtd Casa:", value=int(row['qtd_central']), key=f"q_{idx}")
-                            # FORCE STEP 0.01
                             novo_custo = col2.number_input(f"Custo:", value=float(row['preco_custo']), key=f"c_{idx}", format="%.2f", step=0.01)
                             if st.button(f"💾 Salvar {row['nome do produto']}", key=f"btn_{idx}"):
                                 df.at[idx, 'qtd_central'] = nova_qtd
@@ -980,9 +1009,7 @@ if df is not None:
                         with st.form("edit_estoque_casa_full"):
                             st.markdown(f"### Detalhes")
                             c_dt, c_hr = st.columns(2)
-                            # DATA/HORA DEFAULT
                             dt_reg = c_dt.date_input("Data:", agora_am())
-                            # STEP 60 PARA MINUTOS
                             hr_reg = c_hr.time_input("Hora:", agora_am().time(), step=60)
                             c_forn = st.text_input("Fornecedor:", value=str(df.at[idx_prod, 'ultimo_fornecedor']))
                             
@@ -990,7 +1017,6 @@ if df is not None:
                             c_val, c_custo, c_venda = st.columns(3)
                             nova_val = c_val.date_input("Validade:", value=df.at[idx_prod, 'validade'] if pd.notnull(df.at[idx_prod, 'validade']) else None)
                             
-                            # PREÇOS COM STEP 0.01 E FORMATO %.2f
                             novo_custo = c_custo.number_input("Custo:", value=float(df.at[idx_prod, 'preco_custo']), format="%.2f", step=0.01)
                             novo_venda = c_venda.number_input("Venda:", value=float(df.at[idx_prod, 'preco_venda']), format="%.2f", step=0.01)
                             
@@ -1005,12 +1031,10 @@ if df is not None:
                                 df.at[idx_prod, 'preco_venda'] = novo_venda
                                 if c_forn: df.at[idx_prod, 'ultimo_fornecedor'] = c_forn
                                 
-                                # AQUI: Usa a hora exata selecionada no input, não a atual
                                 dt_full = datetime.combine(dt_reg, hr_reg)
                                 
                                 if acao.startswith("Somar") and qtd_input > 0:
                                     df.at[idx_prod, 'qtd_central'] += qtd_input
-                                    
                                     hist = {'data': dt_full, 'produto': c_nome.upper().strip(), 'fornecedor': c_forn, 'qtd': qtd_input, 'preco_pago': novo_custo, 'total_gasto': qtd_input * novo_custo}
                                     df_hist = pd.concat([df_hist, pd.DataFrame([hist])], ignore_index=True)
                                     salvar_na_nuvem(f"{prefixo}_historico_compras", df_hist, COLS_HIST)
