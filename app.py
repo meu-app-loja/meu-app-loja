@@ -14,6 +14,14 @@ import re
 # ==============================================================================
 st.set_page_config(page_title="Gestão Multi-Lojas", layout="wide", page_icon="🏪")
 
+# --- AJUSTE DE FUSO HORÁRIO (AMAZONAS / CUIABÁ: UTC -4) ---
+# O servidor costuma ser UTC (0). Para Manaus, subtraímos 4 horas.
+FUSO_HORARIO = -4
+
+def agora_am():
+    """Retorna a data e hora atual ajustada para o fuso do Amazonas."""
+    return datetime.utcnow() + timedelta(hours=FUSO_HORARIO)
+
 # --- DEFINIÇÃO DE COLUNAS OBRIGATÓRIAS (GLOBAL) ---
 COLUNAS_VITAIS = [
     'código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central',
@@ -34,7 +42,7 @@ def get_google_client():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(json_creds, scope)
     return gspread.authorize(creds)
 
-# --- FUNÇÃO DE LIMPEZA E CONVERSÃO DE NÚMEROS (CORREÇÃO DO 3,19) ---
+# --- FUNÇÃO DE LIMPEZA E CONVERSÃO DE NÚMEROS ---
 def converter_ptbr(valor):
     """
     Converte valores de forma inteligente.
@@ -66,11 +74,10 @@ def converter_ptbr(valor):
             if s.count('.') > 1:
                 s = s.replace('.', '')
             else:
-                # Se tiver apenas um ponto, verifica se parece decimal (ex: 3.19 ou 10.5)
                 # Se tiver 1 ou 2 dígitos após o ponto, mantemos como decimal.
                 partes = s.split('.')
                 if len(partes[1]) <= 2:
-                    pass # É decimal (3.19), não faz nada, o float aceita
+                    pass # É decimal (3.19), não faz nada
                 else:
                     s = s.replace('.', '') # É milhar (1.200), remove o ponto
         
@@ -138,10 +145,11 @@ def ler_da_nuvem(nome_aba, colunas_padrao):
     except Exception as e:
         return pd.DataFrame(columns=colunas_padrao)
 
-# --- SALVAR NA NUVEM (CORREÇÃO DO "APAGA TUDO") ---
+# --- SALVAR NA NUVEM (COM CORREÇÃO DE HORA E DADOS) ---
 def salvar_na_nuvem(nome_aba, df, colunas_padrao):
     """
-    Salva os dados de forma segura. Corrige o erro de JSON NAN e evita apagar a planilha se der erro.
+    Salva os dados de forma segura.
+    CORREÇÃO: Salva HORA completa para históricos e apenas DATA para validade.
     """
     try:
         # 1. PREPARAÇÃO DOS DADOS (Localmente)
@@ -150,16 +158,20 @@ def salvar_na_nuvem(nome_aba, df, colunas_padrao):
         # Converte datas para string ISO
         for col in df_save.columns:
             if pd.api.types.is_datetime64_any_dtype(df_save[col]):
-                df_save[col] = df_save[col].dt.strftime('%Y-%m-%d')
+                # Se for validade, queremos apenas a DATA (YYYY-MM-DD)
+                if 'validade' in col.lower():
+                    df_save[col] = df_save[col].dt.strftime('%Y-%m-%d')
+                # Se for data de histórico ou movimentação, queremos HORA (YYYY-MM-DD HH:MM:SS)
+                else:
+                    df_save[col] = df_save[col].dt.strftime('%Y-%m-%d %H:%M:%S')
         
-        # CORREÇÃO CRÍTICA: Substitui NaN (Not a Number) por string vazia ou zero
-        # Isso evita o erro "Out of range float values are not JSON compliant"
+        # Substitui NaN por vazio para evitar erro JSON
         df_save = df_save.fillna("") 
         
         # Prepara a lista para o Google
         dados_para_enviar = [df_save.columns.values.tolist()] + df_save.values.tolist()
 
-        # 2. CONEXÃO E ENVIO (Só acontece se o passo 1 funcionou)
+        # 2. CONEXÃO E ENVIO
         client = get_google_client()
         sh = client.open("loja_dados")
         try: 
@@ -167,7 +179,6 @@ def salvar_na_nuvem(nome_aba, df, colunas_padrao):
         except: 
             ws = sh.add_worksheet(title=nome_aba, rows=2000, cols=20)
         
-        # Agora sim, seguro limpar e atualizar
         ws.clear()
         ws.update(dados_para_enviar)
         
@@ -262,21 +273,17 @@ def processar_excel_oficial(arquivo_subido):
 def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, nova_validade, prefixo_ignorar):
     """
     Atualiza o estoque central e preços nas outras lojas.
-    Isso garante que Tabela Geral e Gôndula de outras lojas vejam os preços novos.
     """
     todas_lojas = ["loja1", "loja2", "loja3"]
     for loja in todas_lojas:
         if loja == prefixo_ignorar: continue
         
-        # Lê a outra loja
         df_outra = ler_da_nuvem(f"{loja}_estoque", COLUNAS_VITAIS)
         if not df_outra.empty:
             df_outra.columns = df_outra.columns.str.strip().str.lower()
             mask = df_outra['nome do produto'].astype(str) == str(nome_produto)
             if mask.any():
                 idx = df_outra[mask].index[0]
-                
-                # Atualiza apenas o que foi passado (not None)
                 if qtd_nova_casa is not None: df_outra.at[idx, 'qtd_central'] = qtd_nova_casa
                 if novo_custo is not None and novo_custo > 0: df_outra.at[idx, 'preco_custo'] = novo_custo
                 if novo_venda is not None and novo_venda > 0: df_outra.at[idx, 'preco_venda'] = novo_venda
@@ -291,18 +298,22 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
     
     # 1. TENTA FORMATO NOVO
     info_custom = root.find("Info")
+    # Hora padrão de importação é agora (Amazonas)
+    agora = agora_am()
+    
     if info_custom is not None:
         try:
             forn = info_custom.find("Fornecedor").text
             num = info_custom.find("NumeroNota").text
             dt_s = info_custom.find("DataCompra").text
             hr_s = info_custom.find("HoraCompra").text
+            # Tenta converter a hora do XML, se falhar usa agora
             data_final = datetime.strptime(f"{dt_s} {hr_s}", "%d/%m/%Y %H:%M:%S")
             dados_nota = {'numero': num, 'fornecedor': forn, 'data': data_final, 'itens': []}
         except:
-            dados_nota = {'numero': 'S/N', 'fornecedor': 'IMPORTADO', 'data': datetime.now(), 'itens': []}
+            dados_nota = {'numero': 'S/N', 'fornecedor': 'IMPORTADO', 'data': agora, 'itens': []}
     else:
-        dados_nota = {'numero': 'S/N', 'fornecedor': 'IMPORTADO', 'data': datetime.now(), 'itens': []}
+        dados_nota = {'numero': 'S/N', 'fornecedor': 'IMPORTADO', 'data': agora, 'itens': []}
         for elem in root.iter():
             tag = tag_limpa(elem)
             if tag == 'nNF': dados_nota['numero'] = elem.text
@@ -407,7 +418,7 @@ if df is not None:
         st.title(f"📊 Painel de Controle - {loja_atual}")
         if df.empty: st.info("Comece cadastrando produtos.")
         else:
-            hoje = datetime.now(); df_valido = df[pd.notnull(df['validade'])].copy()
+            hoje = agora_am(); df_valido = df[pd.notnull(df['validade'])].copy()
             df_critico = df_valido[(df_valido['validade'] <= hoje + timedelta(days=5)) & ((df_valido['qtd.estoque'] > 0) | (df_valido['qtd_central'] > 0))]
             df_atencao = df_valido[(df_valido['validade'] > hoje + timedelta(days=5)) & (df_valido['validade'] <= hoje + timedelta(days=10))]
             valor_estoque = (df['qtd.estoque'] * df['preco_custo']).sum() + (df['qtd_central'] * df['preco_custo']).sum()
@@ -450,7 +461,7 @@ if df is not None:
                                     nome_prod = df.at[idx, 'nome do produto']
                                     df.at[idx, 'qtd_central'] -= qtd_pick
                                     df.at[idx, 'qtd.estoque'] += qtd_pick
-                                    log_movs.append({'data_hora': datetime.now(), 'produto': nome_prod, 'qtd_movida': qtd_pick})
+                                    log_movs.append({'data_hora': agora_am(), 'produto': nome_prod, 'qtd_movida': qtd_pick})
                                     atualizar_casa_global(nome_prod, df.at[idx, 'qtd_central'], None, None, None, prefixo)
                                     movidos += 1
                                 else: erros += 1
@@ -501,7 +512,7 @@ if df is not None:
                             if not df_lista_compras.empty:
                                 ja_na_lista = df_lista_compras['produto'].astype(str).str.contains(row['nome do produto'], regex=False).any()
                             if not ja_na_lista:
-                                novos_itens.append({'produto': row['nome do produto'], 'qtd_sugerida': row['qtd_minima'] * 3, 'fornecedor': row['ultimo_fornecedor'], 'custo_previsto': row['preco_custo'], 'data_inclusao': datetime.now().strftime("%d/%m/%Y"), 'status': 'A Comprar'})
+                                novos_itens.append({'produto': row['nome do produto'], 'qtd_sugerida': row['qtd_minima'] * 3, 'fornecedor': row['ultimo_fornecedor'], 'custo_previsto': row['preco_custo'], 'data_inclusao': agora_am().strftime("%d/%m/%Y"), 'status': 'A Comprar'})
                         
                         if novos_itens:
                             df_lista_compras = pd.concat([df_lista_compras, pd.DataFrame(novos_itens)], ignore_index=True)
@@ -520,7 +531,7 @@ if df is not None:
                         preco_ref = 0.0
                         mask = df['nome do produto'] == prod_man
                         if mask.any(): preco_ref = df.loc[mask, 'preco_custo'].values[0]
-                        novo_item = {'produto': prod_man, 'qtd_sugerida': qtd_man, 'fornecedor': obs_man, 'custo_previsto': preco_ref, 'data_inclusao': datetime.now().strftime("%d/%m/%Y"), 'status': 'Manual'}
+                        novo_item = {'produto': prod_man, 'qtd_sugerida': qtd_man, 'fornecedor': obs_man, 'custo_previsto': preco_ref, 'data_inclusao': agora_am().strftime("%d/%m/%Y"), 'status': 'Manual'}
                         df_lista_compras = pd.concat([df_lista_compras, pd.DataFrame([novo_item])], ignore_index=True)
                         salvar_na_nuvem(f"{prefixo}_lista_compras", df_lista_compras, COLS_LISTA); st.success("Adicionado!"); st.rerun()
                     else: st.error("Selecione um produto.")
@@ -535,8 +546,9 @@ if df is not None:
                 novo_nome = st.text_input("Nome do Produto:")
                 nova_cat = st.text_input("Categoria:")
             with c2:
-                novo_custo = st.number_input("Preço Custo:", min_value=0.0, format="%.2f")
-                novo_venda = st.number_input("Preço Venda:", min_value=0.0, format="%.2f")
+                # STEP 0.01 AJUDA A FORÇAR DECIMAL
+                novo_custo = st.number_input("Preço Custo:", min_value=0.0, format="%.2f", step=0.01)
+                novo_venda = st.number_input("Preço Venda:", min_value=0.0, format="%.2f", step=0.01)
                 novo_min = st.number_input("Estoque Mínimo:", min_value=0, value=5)
             st.divider()
             c3, c4, c5 = st.columns(3)
@@ -630,7 +642,6 @@ if df is not None:
                                 atualizados_cont += 1
                                 nome_final = produto_escolhido
                         
-                        # CORREÇÃO: Garante que atualiza nas outras lojas e na tabela geral
                         if nome_final:
                             atualizar_casa_global(nome_final, df.loc[df['nome do produto'] == nome_final, 'qtd_central'].values[0], preco_pago, None, None, prefixo)
                         
@@ -751,8 +762,8 @@ if df is not None:
                                 
                                 try:
                                     dt_v = pd.to_datetime(row[col_data], dayfirst=True)
-                                    if pd.isna(dt_v): dt_v = datetime.now()
-                                except: dt_v = datetime.now()
+                                    if pd.isna(dt_v): dt_v = agora_am()
+                                except: dt_v = agora_am()
                                 
                                 if pd.isna(qtd) or qtd <= 0: continue
                                 
@@ -826,8 +837,8 @@ if df is not None:
                             st.subheader("🚚 Transferência (Casa -> Loja)")
                             with st.form("form_transf_gondola"):
                                 c_dt, c_hr, c_qtd = st.columns(3)
-                                dt_transf = c_dt.date_input("Data da Transferência:", datetime.today())
-                                hr_transf = c_hr.time_input("Hora:", datetime.now().time())
+                                dt_transf = c_dt.date_input("Data da Transferência:", agora_am())
+                                hr_transf = c_hr.time_input("Hora:", agora_am().time())
                                 qtd_transf = c_qtd.number_input(f"Quantidade (Máx: {int(df.at[idx, 'qtd_central'])}):", min_value=0, max_value=int(df.at[idx, 'qtd_central']), value=0)
                                 if st.form_submit_button("⬇️ CONFIRMAR TRANSFERÊNCIA"):
                                     if qtd_transf > 0:
@@ -849,8 +860,9 @@ if df is not None:
                             c_nome = st.text_input("Corrigir Nome:", value=nome_prod)
                             c_forn = st.text_input("Fornecedor Principal:", value=df.at[idx, 'ultimo_fornecedor'])
                             c_custo, c_venda = st.columns(2)
-                            n_custo = c_custo.number_input("Preço Custo:", value=float(df.at[idx, 'preco_custo']), format="%.2f")
-                            n_venda = c_venda.number_input("Preço Venda:", value=float(df.at[idx, 'preco_venda']), format="%.2f")
+                            # STEP 0.01 PARA PREÇOS
+                            n_custo = c_custo.number_input("Preço Custo:", value=float(df.at[idx, 'preco_custo']), format="%.2f", step=0.01)
+                            n_venda = c_venda.number_input("Preço Venda:", value=float(df.at[idx, 'preco_venda']), format="%.2f", step=0.01)
                             c1, c2 = st.columns(2)
                             n_qtd_loja = c1.number_input("Qtd Real Loja:", value=int(df.at[idx, 'qtd.estoque']))
                             n_val = c2.date_input("Nova Validade:", value=val if pd.notnull(val) else None)
@@ -883,13 +895,13 @@ if df is not None:
                 with st.form("compra"):
                     st.write(f"📝 Detalhes da Compra de: **{item}**")
                     c_dt, c_hr = st.columns(2)
-                    dt_compra = c_dt.date_input("Data da Compra:", datetime.today())
-                    hr_compra = c_hr.time_input("Hora da Compra:", datetime.now().time())
+                    dt_compra = c_dt.date_input("Data da Compra:", agora_am())
+                    hr_compra = c_hr.time_input("Hora da Compra:", agora_am().time())
                     forn_compra = st.text_input("Fornecedor:", value=df.at[idx, 'ultimo_fornecedor'])
                     c1, c2, c3 = st.columns(3)
                     qtd = c1.number_input("Qtd Chegada:", value=int(df.at[idx, 'qtd_comprada']))
-                    custo = c2.number_input("Preço Pago (UN):", value=float(df.at[idx, 'preco_custo']), format="%.2f")
-                    venda = c3.number_input("Novo Preço Venda:", value=float(df.at[idx, 'preco_venda']), format="%.2f")
+                    custo = c2.number_input("Preço Pago (UN):", value=float(df.at[idx, 'preco_custo']), format="%.2f", step=0.01)
+                    venda = c3.number_input("Novo Preço Venda:", value=float(df.at[idx, 'preco_venda']), format="%.2f", step=0.01)
                     
                     if st.form_submit_button("✅ ENTRAR NO ESTOQUE"):
                         df.at[idx, 'qtd_central'] += qtd
@@ -927,6 +939,7 @@ if df is not None:
                 key="editor_historico_geral",
                 num_rows="dynamic",
                 column_config={
+                    "data": st.column_config.DatetimeColumn("Data/Hora", format="DD/MM/YYYY HH:mm"),
                     "preco_sem_desconto": st.column_config.NumberColumn("Preço Tabela", format="R$ %.2f"),
                     "desconto_total_money": st.column_config.NumberColumn("Desconto TOTAL", format="R$ %.2f"),
                     "preco_pago": st.column_config.NumberColumn("Pago (Unit)", format="R$ %.2f", disabled=True),
@@ -980,7 +993,7 @@ if df is not None:
                             st.write(f"**{row['nome do produto']}**")
                             col1, col2 = st.columns(2)
                             nova_qtd = col1.number_input(f"Qtd Casa:", value=int(row['qtd_central']), key=f"q_{idx}")
-                            novo_custo = col2.number_input(f"Custo:", value=float(row['preco_custo']), key=f"c_{idx}")
+                            novo_custo = col2.number_input(f"Custo:", value=float(row['preco_custo']), key=f"c_{idx}", format="%.2f", step=0.01)
                             if st.button(f"💾 Salvar {row['nome do produto']}", key=f"btn_{idx}"):
                                 df.at[idx, 'qtd_central'] = nova_qtd
                                 df.at[idx, 'preco_custo'] = novo_custo
@@ -1020,15 +1033,18 @@ if df is not None:
                         with st.form("edit_estoque_casa_full"):
                             st.markdown(f"### Detalhes")
                             c_dt, c_hr = st.columns(2)
-                            dt_reg = c_dt.date_input("Data:", datetime.today())
-                            hr_reg = c_hr.time_input("Hora:", datetime.now().time())
+                            # FUSO AJUSTADO AQUI
+                            dt_reg = c_dt.date_input("Data:", agora_am())
+                            hr_reg = c_hr.time_input("Hora:", agora_am().time())
                             c_forn = st.text_input("Fornecedor:", value=str(df.at[idx_prod, 'ultimo_fornecedor']))
                             
                             c_nome = st.text_input("Nome:", value=df.at[idx_prod, 'nome do produto'])
                             c_val, c_custo, c_venda = st.columns(3)
                             nova_val = c_val.date_input("Validade:", value=df.at[idx_prod, 'validade'] if pd.notnull(df.at[idx_prod, 'validade']) else None)
-                            novo_custo = c_custo.number_input("Custo:", value=float(df.at[idx_prod, 'preco_custo']), format="%.2f")
-                            novo_venda = c_venda.number_input("Venda:", value=float(df.at[idx_prod, 'preco_venda']), format="%.2f")
+                            
+                            # STEP 0.01 PARA PREÇOS
+                            novo_custo = c_custo.number_input("Custo:", value=float(df.at[idx_prod, 'preco_custo']), format="%.2f", step=0.01)
+                            novo_venda = c_venda.number_input("Venda:", value=float(df.at[idx_prod, 'preco_venda']), format="%.2f", step=0.01)
                             
                             c_qtd, c_acao = st.columns([1, 2])
                             qtd_input = c_qtd.number_input("Quantidade:", min_value=0, value=0)
