@@ -7,11 +7,11 @@ import time
 import re
 
 # ==============================================================================
-# 1. CONFIGURAÇÃO (MODO OFFLINE - SEM SENHAS)
+# 1. CONFIGURAÇÃO GERAL
 # ==============================================================================
-st.set_page_config(layout="wide", page_title="Gestão Loja (Modo Rápido)")
+st.set_page_config(layout="wide", page_title="Gestão Multi-Lojas (Completo Offline)")
 
-# Definição das colunas principais
+# Colunas Vitais (Não altere a ordem)
 COLUNAS_VITAIS = [
     "ean", "descricao", "categoria", 
     "custo_unitario", "preco_venda", 
@@ -19,131 +19,257 @@ COLUNAS_VITAIS = [
     "estoque_central", "localizacao"
 ]
 
+COLS_HIST = ["data", "ean", "descricao", "qtd_compra", "custo_pag", "num_nota"]
+
 # ==============================================================================
-# 2. BANCO DE DADOS NA MEMÓRIA (IGNORA O SECRETS)
+# 2. BANCO DE DADOS NA MEMÓRIA (COM DADOS INICIAIS)
 # ==============================================================================
-# Este bloco cria dados falsos para você ver o app funcionando agora
 
 if "db_produtos" not in st.session_state:
-    # Dados de exemplo para não começar vazio
-    dados_exemplo = [
-        {"ean": "7894900011517", "descricao": "REFRIGERANTE COCA COLA 2L", "categoria": "BEBIDAS", "custo_unitario": 5.49, "preco_venda": 8.99, "qtd_loja1": 12, "qtd_loja2": 24, "qtd_loja3": 6, "estoque_central": 100, "localizacao": "A1"},
-        {"ean": "7891035800201", "descricao": "SABAO EM PO OMO 800G", "categoria": "LIMPEZA", "custo_unitario": 10.90, "preco_venda": 16.50, "qtd_loja1": 5, "qtd_loja2": 10, "qtd_loja3": 0, "estoque_central": 50, "localizacao": "B3"},
-        {"ean": "7896006743120", "descricao": "ARROZ BRANCO TIPO 1 5KG", "categoria": "ALIMENTOS", "custo_unitario": 21.00, "preco_venda": 29.90, "qtd_loja1": 20, "qtd_loja2": 15, "qtd_loja3": 10, "estoque_central": 200, "localizacao": "C1"},
+    # Dados iniciais para você não ver tela branca
+    dados_iniciais = [
+        {"ean": "7894900011517", "descricao": "COCA COLA 2L", "categoria": "BEBIDAS", "custo_unitario": 5.49, "preco_venda": 8.99, "qtd_loja1": 12, "qtd_loja2": 24, "qtd_loja3": 6, "estoque_central": 100, "localizacao": "A1"},
+        {"ean": "7891035800201", "descricao": "SABAO OMO 1KG", "categoria": "LIMPEZA", "custo_unitario": 12.50, "preco_venda": 18.90, "qtd_loja1": 5, "qtd_loja2": 10, "qtd_loja3": 2, "estoque_central": 50, "localizacao": "B3"},
+        {"ean": "7896006743120", "descricao": "ARROZ TIO JOAO 5KG", "categoria": "ALIMENTOS", "custo_unitario": 22.15, "preco_venda": 32.90, "qtd_loja1": 20, "qtd_loja2": 15, "qtd_loja3": 10, "estoque_central": 200, "localizacao": "C1"},
     ]
-    df_inicial = pd.DataFrame(dados_exemplo)
-    
-    # Garante que todas as colunas existem preenchidas com 0
+    df_inicio = pd.DataFrame(dados_iniciais)
+    # Garante estrutura correta
     for col in COLUNAS_VITAIS:
-        if col not in df_inicial.columns:
-            df_inicial[col] = 0.0
-            
-    st.session_state["db_produtos"] = df_inicial
+        if col not in df_inicio.columns:
+            df_inicio[col] = 0.0
+    st.session_state["db_produtos"] = df_inicio
 
 if "db_historico" not in st.session_state:
-    st.session_state["db_historico"] = pd.DataFrame(columns=["data", "descricao", "qtd", "valor", "nota"])
+    st.session_state["db_historico"] = pd.DataFrame(columns=COLS_HIST)
 
-# Funções simplificadas de leitura e escrita
-def ler_dados():
-    return st.session_state["db_produtos"]
+# Funções para ler e salvar na memória
+def ler_dados(tipo):
+    if tipo == "Produtos": return st.session_state["db_produtos"]
+    return st.session_state["db_historico"]
 
-def salvar_dados(df_novo):
-    st.session_state["db_produtos"] = df_novo
-    st.toast("Alterações salvas na memória!", icon="💾")
+def salvar_dados(df, tipo):
+    if tipo == "Produtos":
+        # Garante que números são números antes de salvar
+        for col in ["custo_unitario", "preco_venda", "qtd_loja1", "qtd_loja2", "qtd_loja3"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+        st.session_state["db_produtos"] = df
+    else:
+        st.session_state["db_historico"] = df
+    st.toast("Dados atualizados na memória!", icon="✅")
 
 # ==============================================================================
-# 3. FUNÇÕES DE AJUDA
+# 3. FUNÇÕES INTELIGENTES (CORREÇÃO DE FORMATO)
 # ==============================================================================
 
-def format_br(valor):
-    if pd.isna(valor): return "R$ 0,00"
-    return f"R$ {float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
-def normalizar(texto):
+def normalizar_texto(texto):
+    """Limpa texto para buscas."""
     if not isinstance(texto, str): return str(texto)
     return unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('ASCII').lower().strip()
 
+def format_br(valor):
+    """Mostra R$ bonito na tela."""
+    if valor is None or pd.isna(valor): return "R$ 0,00"
+    try:
+        return f"R$ {float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except:
+        return str(valor)
+
+def calcular_match_score(nome_xml, nome_db):
+    """Pontuação para sugerir produto parecido."""
+    set_xml = set(normalizar_texto(nome_xml).split())
+    set_db = set(normalizar_texto(nome_db).split())
+    if not set_xml or not set_db: return 0
+    intersection = set_xml.intersection(set_db)
+    return len(intersection) / len(set_xml)
+
+def parse_nfe_xml(arquivo_xml):
+    """Lê a Nota Fiscal XML."""
+    try:
+        tree = ET.parse(arquivo_xml)
+        root = tree.getroot()
+        ns = {'nfe': 'http://www.portalfiscal.inf.br/nfe'}
+        itens = []
+        
+        # Tenta achar tags com ou sem namespace
+        try: det_tags = root.findall('.//nfe:det', ns)
+        except: det_tags = []
+        if not det_tags: det_tags = root.findall('.//det')
+        
+        try: nNF = root.find('.//nfe:nNF', ns).text
+        except: nNF = "S/N"
+
+        for det in det_tags:
+            prod = det.find('nfe:prod', ns) if det.find('nfe:prod', ns) is not None else det.find('prod')
+            if prod is not None:
+                ean = prod.find('cEAN').text if prod.find('cEAN') is not None else ""
+                xProd = prod.find('xProd').text
+                qCom = float(prod.find('qCom').text)
+                vProd = float(prod.find('vProd').text)
+                vDesc = 0.0
+                if prod.find('vDesc') is not None:
+                    try: vDesc = float(prod.find('vDesc').text)
+                    except: pass
+                
+                custo_unit = (vProd - vDesc) / qCom
+                itens.append({"ean": ean, "descricao_xml": xProd, "qtd_xml": qCom, "custo_xml": custo_unit, "nota": nNF})
+        return itens
+    except Exception as e:
+        st.error(f"Erro no XML: {e}")
+        return []
+
 # ==============================================================================
-# 4. APLICAÇÃO VISUAL
+# 4. INTERFACE COMPLETA
 # ==============================================================================
 
-st.sidebar.title("🏪 Gestão Simples")
-st.sidebar.warning("⚠️ Modo Demonstração (Sem Banco de Dados)")
+# --- SIDEBAR ---
+st.sidebar.title("🏪 Gestão Pro")
+st.sidebar.info("Modo: Memória Local (Rápido)")
+loja_selecionada = st.sidebar.selectbox("Selecione a Unidade", ["Loja 1", "Loja 2", "Loja 3"])
+col_qtd_loja = f"qtd_{normalizar_texto(loja_selecionada).replace(' ', '')}"
+modo_celular = st.sidebar.checkbox("📱 Modo Celular (Simplificado)")
 
-loja = st.sidebar.selectbox("Sua Loja Atual", ["Loja 1", "Loja 2", "Loja 3"])
-col_loja = f"qtd_{normalizar(loja).replace(' ', '')}" # ex: qtd_loja1
+# --- MENU PRINCIPAL ---
+menu = st.radio("Menu", ["Dashboard", "Gôndola (Busca)", "Importar XML", "Estoque Central", "Histórico", "Tabela Geral"], horizontal=True)
+st.markdown("---")
 
-menu = st.radio("Navegação", ["Dashboard", "Consultar Preço", "Importar Nota (XML)", "Tabela Completa"], horizontal=True)
-st.divider()
+# Carrega dados atuais
+df_prod = ler_dados("Produtos")
+df_hist = ler_dados("Historico")
 
-df = ler_dados()
-
-# --- TELA 1: DASHBOARD ---
+# 1. DASHBOARD
 if menu == "Dashboard":
-    col1, col2 = st.columns(2)
-    qtd_total = df[col_loja].sum()
-    valor_total = (df[col_loja] * df['custo_unitario']).sum()
+    c1, c2, c3 = st.columns(3)
+    total_itens = df_prod[col_qtd_loja].sum()
+    valor_estoque = (df_prod[col_qtd_loja] * df_prod['custo_unitario']).sum()
     
-    col1.metric("📦 Itens nesta Loja", int(qtd_total))
-    col2.metric("💰 Valor de Estoque", format_br(valor_total))
+    c1.metric("Total Itens (Unidade)", f"{int(total_itens)}")
+    c2.metric("Valor Estoque (Custo)", format_br(valor_estoque))
+    c3.metric("Total de SKUs", len(df_prod))
     
-    st.subheader("Produtos com Estoque Baixo")
-    st.dataframe(df[df[col_loja] < 5][['descricao', col_loja]], use_container_width=True)
+    st.markdown("### ⚠️ Estoque Baixo")
+    st.dataframe(df_prod[df_prod[col_qtd_loja] < 5][['descricao', col_qtd_loja, 'estoque_central']], use_container_width=True)
 
-# --- TELA 2: CONSULTA ---
-elif menu == "Consultar Preço":
-    busca = st.text_input("🔍 Digite o nome ou código de barras", "")
-    if busca:
-        termo = normalizar(busca)
-        # Filtra o dataframe
-        resultado = df[df['descricao'].apply(normalizar).str.contains(termo) | df['ean'].astype(str).str.contains(termo)]
+# 2. GÔNDOLA (BUSCA)
+elif menu == "Gôndola (Busca)":
+    termo = st.text_input("🔍 Buscar Produto (Nome ou EAN)", "")
+    if termo:
+        termo_norm = normalizar_texto(termo)
+        mask = df_prod['descricao'].apply(normalizar_texto).str.contains(termo_norm) | df_prod['ean'].astype(str).str.contains(termo_norm)
+        resultados = df_prod[mask]
         
-        if len(resultado) == 0:
-            st.warning("Nenhum produto encontrado.")
-        
-        for i, row in resultado.iterrows():
+        for idx, row in resultados.iterrows():
             with st.container():
-                st.info(f"**{row['descricao']}**")
-                c1, c2, c3 = st.columns(3)
-                c1.markdown(f"**Preço:** :green[{format_br(row['preco_venda'])}]")
-                c2.markdown(f"**Estoque Loja:** {int(row[col_loja])}")
-                c3.markdown(f"**Loc:** {row['localizacao']}")
+                st.markdown(f"""
+                <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; margin-bottom: 10px; border-left: 5px solid #ff4b4b;">
+                    <h4 style="margin:0; color: #333;">{row['descricao']}</h4>
+                    <p style="margin:0; color: #666;">EAN: {row['ean']} | Loc: <b>{row['localizacao']}</b></p>
+                    <hr style="margin: 8px 0;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div style="font-size: 1.1em;">Estoque Loja: <b>{int(row[col_qtd_loja])}</b></div>
+                        <div style="font-size: 1.3em; color: green; font-weight: bold;">{format_br(row['preco_venda'])}</div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                if not modo_celular:
+                    st.dataframe(row.to_frame().T, hide_index=True)
 
-# --- TELA 3: IMPORTAR XML ---
-elif menu == "Importar Nota (XML)":
-    st.write("Faça upload do XML da Nota Fiscal para dar entrada.")
-    arquivo = st.file_uploader("Arquivo XML", type=["xml"])
+# 3. IMPORTAR XML
+elif menu == "Importar XML":
+    st.info("Importe o XML da Nota Fiscal para atualizar estoque e custos.")
+    arquivo = st.file_uploader("Upload XML NFe", type=["xml"])
     
     if arquivo:
-        try:
-            tree = ET.parse(arquivo)
-            root = tree.getroot()
-            ns = {'nfe': 'http://www.portalfiscal.inf.br/nfe'}
-            
-            # Tenta pegar os produtos
-            prods = []
-            det_tags = root.findall('.//nfe:det', ns)
-            if not det_tags: det_tags = root.findall('.//det') # Tenta sem namespace
-            
-            for det in det_tags:
-                xProd = det.find('.//nfe:xProd', ns).text if det.find('.//nfe:xProd', ns) is not None else "Produto"
-                qCom = float(det.find('.//nfe:qCom', ns).text) if det.find('.//nfe:qCom', ns) is not None else 0
-                prods.append({"nome": xProd, "qtd": qCom})
-            
-            st.success(f"Leitura com sucesso! Encontrados {len(prods)} itens.")
-            st.dataframe(pd.DataFrame(prods))
-            
-            if st.button("Simular Entrada no Estoque"):
-                st.balloons()
-                st.success("Estoque atualizado (Simulação)!")
+        itens_xml = parse_nfe_xml(arquivo)
+        st.write(f"Encontrados {len(itens_xml)} itens.")
+        
+        with st.form("form_import"):
+            processar_dados = []
+            for i, item in enumerate(itens_xml):
+                st.markdown(f"**Item {i+1}: {item['descricao_xml']}**")
+                st.caption(f"Qtd: {item['qtd_xml']} | Custo Nota: {format_br(item['custo_xml'])}")
                 
-        except Exception as e:
-            st.error(f"Erro ao ler XML: {e}")
+                # Match Inteligente
+                match_ean = df_prod[df_prod['ean'].astype(str) == str(item['ean'])]
+                if not match_ean.empty:
+                    idx_match = match_ean.index[0]
+                    opcoes = [f"{idx_match} - {match_ean.iloc[0]['descricao']}"]
+                    index_padrao = 0
+                else:
+                    scores = []
+                    for idx, row_db in df_prod.iterrows():
+                        sc = calcular_match_score(item['descricao_xml'], row_db['descricao'])
+                        if sc > 0.1: scores.append((idx, row_db['descricao'], sc))
+                    scores.sort(key=lambda x: x[2], reverse=True)
+                    opcoes = ["(CRIAR NOVO)"] + [f"{x[0]} - {x[1]}" for x in scores[:3]]
+                    index_padrao = 0 if not scores else 1
+                
+                escolha = st.selectbox(f"Vincular a:", opcoes, index=index_padrao, key=f"sel_{i}")
+                processar_dados.append({"xml": item, "escolha": escolha})
+                st.divider()
+            
+            if st.form_submit_button("✅ Processar Entrada de Estoque"):
+                novos_historicos = []
+                df_temp = df_prod.copy()
+                
+                for p in processar_dados:
+                    item = p['xml']
+                    if p['escolha'] == "(CRIAR NOVO)":
+                        novo = {c: 0.0 if "qtd" in c or "preco" in c else "" for c in df_prod.columns}
+                        novo.update({
+                            "ean": item['ean'], "descricao": item['descricao_xml'],
+                            "custo_unitario": float(item['custo_xml']), 
+                            "preco_venda": float(item['custo_xml']) * 1.5,
+                            col_qtd_loja: float(item['qtd_xml']),
+                            "estoque_central": 0
+                        })
+                        df_temp = pd.concat([df_temp, pd.DataFrame([novo])], ignore_index=True)
+                        desc_ref = item['descricao_xml']
+                    else:
+                        idx_db = int(p['escolha'].split(" - ")[0])
+                        df_temp.at[idx_db, 'custo_unitario'] = float(item['custo_xml'])
+                        df_temp.at[idx_db, col_qtd_loja] = float(df_temp.at[idx_db, col_qtd_loja]) + float(item['qtd_xml'])
+                        desc_ref = df_temp.at[idx_db, 'descricao']
+                    
+                    novos_historicos.append({
+                        "data": datetime.date.today().strftime("%Y-%m-%d"),
+                        "ean": item['ean'], "descricao": desc_ref,
+                        "qtd_compra": item['qtd_xml'], "custo_pag": item['custo_xml'], "num_nota": item['nota']
+                    })
+                
+                salvar_dados(df_temp, "Produtos")
+                salvar_dados(pd.concat([df_hist, pd.DataFrame(novos_historicos)], ignore_index=True), "Historico")
+                st.success("Estoque atualizado!")
+                time.sleep(1)
+                st.rerun()
 
-# --- TELA 4: TABELA COMPLETA ---
-elif menu == "Tabela Completa":
-    st.write("Edite os valores diretamente na tabela abaixo:")
-    df_editado = st.data_editor(df, num_rows="dynamic", use_container_width=True)
+# 4. ESTOQUE CENTRAL
+elif menu == "Estoque Central":
+    st.dataframe(df_prod[['ean', 'descricao', 'estoque_central', 'custo_unitario']], use_container_width=True)
+
+# 5. HISTÓRICO
+elif menu == "Histórico":
+    st.dataframe(df_hist, use_container_width=True)
+
+# 6. TABELA GERAL (EDIÇÃO)
+elif menu == "Tabela Geral":
+    st.warning("⚠️ Edite os valores abaixo. O sistema salvará automaticamente ao clicar no botão.")
     
-    if st.button("Salvar Alterações"):
-        salvar_dados(df_editado)
+    # Configuração para garantir que números sejam tratados como dinheiro/float
+    column_config = {
+        "preco_venda": st.column_config.NumberColumn("Preço Venda", format="R$ %.2f", step=0.01),
+        "custo_unitario": st.column_config.NumberColumn("Custo", format="R$ %.2f", step=0.01),
+        "qtd_loja1": st.column_config.NumberColumn("Qtd Loja 1", step=1),
+        "qtd_loja2": st.column_config.NumberColumn("Qtd Loja 2", step=1),
+        "qtd_loja3": st.column_config.NumberColumn("Qtd Loja 3", step=1),
+    }
+
+    df_editado = st.data_editor(
+        df_prod, 
+        num_rows="dynamic", 
+        use_container_width=True,
+        column_config=column_config
+    )
+    
+    if st.button("💾 Salvar Alterações na Memória"):
+        salvar_dados(df_editado, "Produtos")
