@@ -10,6 +10,13 @@ import difflib
 st.set_page_config(page_title="Gestão Multi-Lojas", layout="wide", page_icon="🏪")
 
 # ==============================================================================
+# 🕒 AJUSTE DE FUSO HORÁRIO (MANAUS / AMAZONAS / CUIABÁ: UTC-4)
+# ==============================================================================
+def obter_hora_manaus():
+    """Retorna a data e hora atual ajustada para o fuso de Manaus (-4h em relação ao UTC)."""
+    return datetime.utcnow() - timedelta(hours=4)
+
+# ==============================================================================
 # 🆕 FUNÇÕES DE LIMPEZA E PADRONIZAÇÃO (CRUCIAIS PARA A BUSCA)
 # ==============================================================================
 def normalizar_texto(texto):
@@ -262,7 +269,7 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
     root = tree.getroot()
     def tag_limpa(element): return element.tag.split('}')[-1]
 
-    dados_nota = {'numero': '', 'fornecedor': '', 'data': datetime.now(), 'itens': []}
+    dados_nota = {'numero': '', 'fornecedor': '', 'data': obter_hora_manaus(), 'itens': []}
 
     # Prepara memória da base oficial para busca
     lista_nomes_ref = []
@@ -406,7 +413,7 @@ if df is not None:
         if df.empty:
             st.info("Comece cadastrando produtos.")
         else:
-            hoje = datetime.now()
+            hoje = obter_hora_manaus()
             df_valido = df[pd.notnull(df['validade'])].copy()
             df_critico = df_valido[(df_valido['validade'] <= hoje + timedelta(days=5)) & ((df_valido['qtd.estoque'] > 0) | (df_valido['qtd_central'] > 0))]
             df_atencao = df_valido[(df_valido['validade'] > hoje + timedelta(days=5)) & (df_valido['validade'] <= hoje + timedelta(days=10))]
@@ -459,7 +466,7 @@ if df is not None:
                                     nome_prod = df.at[idx, 'nome do produto']
                                     df.at[idx, 'qtd_central'] -= qtd_pick
                                     df.at[idx, 'qtd.estoque'] += qtd_pick
-                                    log_movs.append({'data_hora': datetime.now(), 'produto': nome_prod, 'qtd_movida': qtd_pick})
+                                    log_movs.append({'data_hora': obter_hora_manaus(), 'produto': nome_prod, 'qtd_movida': qtd_pick})
                                     atualizar_casa_global(nome_prod, df.at[idx, 'qtd_central'], None, None, None, prefixo)
                                     movidos += 1
                                 else:
@@ -519,7 +526,7 @@ if df is not None:
                                     'qtd_sugerida': row['qtd_minima'] * 3,
                                     'fornecedor': row['ultimo_fornecedor'],
                                     'custo_previsto': row['preco_custo'],
-                                    'data_inclusao': datetime.now().strftime("%d/%m/%Y"),
+                                    'data_inclusao': obter_hora_manaus().strftime("%d/%m/%Y"),
                                     'status': 'A Comprar'
                                 })
                         if novos_itens:
@@ -541,7 +548,7 @@ if df is not None:
                         preco_ref = 0.0
                         mask = df['nome do produto'] == prod_man
                         if mask.any(): preco_ref = df.loc[mask, 'preco_custo'].values[0]
-                        novo_item = {'produto': prod_man, 'qtd_sugerida': qtd_man, 'fornecedor': obs_man, 'custo_previsto': preco_ref, 'data_inclusao': datetime.now().strftime("%d/%m/%Y"), 'status': 'Manual'}
+                        novo_item = {'produto': prod_man, 'qtd_sugerida': qtd_man, 'fornecedor': obs_man, 'custo_previsto': preco_ref, 'data_inclusao': obter_hora_manaus().strftime("%d/%m/%Y"), 'status': 'Manual'}
                         df_lista_compras = pd.concat([df_lista_compras, pd.DataFrame([novo_item])], ignore_index=True)
                         salvar_lista_compras(df_lista_compras, prefixo)
                         st.success("Adicionado!")
@@ -716,7 +723,7 @@ if df is not None:
                         atualizar_casa_global(nome_final, qtd_central_final, preco_pago, None, None, prefixo)
                         
                         novos_hist.append({
-                            'data': datetime.now(), 'produto': nome_final, 'fornecedor': dados['fornecedor'], 
+                            'data': obter_hora_manaus(), 'produto': nome_final, 'fornecedor': dados['fornecedor'], 
                             'qtd': qtd_xml, 'preco_pago': preco_pago, 'total_gasto': qtd_xml * preco_pago,
                             'numero_nota': dados['numero'], 'desconto_total_money': desc_total_val, 'preco_sem_desconto': preco_sem_desc
                         })
@@ -866,8 +873,8 @@ if df is not None:
                                 qtd = pd.to_numeric(row[col_qtd], errors='coerce')
                                 try:
                                     dt_v = pd.to_datetime(row[col_data], dayfirst=True)
-                                    if pd.isna(dt_v): dt_v = datetime.now()
-                                except: dt_v = datetime.now()
+                                    if pd.isna(dt_v): dt_v = obter_hora_manaus()
+                                except: dt_v = obter_hora_manaus()
                                 if pd.isna(qtd) or qtd <= 0: continue
                                 mask = (df['código de barras'].astype(str).str.contains(nome, na=False) |
                                         df['nome do produto'].astype(str).str.contains(nome, case=False, na=False))
@@ -946,8 +953,8 @@ if df is not None:
                             st.subheader("🚚 Transferência (Casa -> Loja)")
                             with st.form("form_transf_gondola"):
                                 c_dt, c_hr, c_qtd = st.columns(3)
-                                dt_transf = c_dt.date_input("Data da Transferência:", datetime.today())
-                                hr_transf = c_hr.time_input("Hora:", datetime.now().time())
+                                dt_transf = c_dt.date_input("Data da Transferência:", obter_hora_manaus().date())
+                                hr_transf = c_hr.time_input("Hora:", obter_hora_manaus().time())
                                 qtd_transf = c_qtd.number_input(f"Quantidade (Máx: {int(df.at[idx, 'qtd_central'])}):", min_value=0, max_value=int(df.at[idx, 'qtd_central']), value=0)
                                 if st.form_submit_button("⬇️ CONFIRMAR TRANSFERÊNCIA"):
                                     if qtd_transf > 0:
@@ -1001,8 +1008,8 @@ if df is not None:
                 with st.form("compra"):
                     st.write(f"📝 Detalhes da Compra de: **{item}**")
                     c_dt, c_hr = st.columns(2)
-                    dt_compra = c_dt.date_input("Data da Compra:", datetime.today())
-                    hr_compra = c_hr.time_input("Hora da Compra:", datetime.now().time())
+                    dt_compra = c_dt.date_input("Data da Compra:", obter_hora_manaus().date())
+                    hr_compra = c_hr.time_input("Hora da Compra:", obter_hora_manaus().time())
                     forn_compra = st.text_input("Fornecedor desta compra:", value=df.at[idx, 'ultimo_fornecedor'])
                     c1, c2, c3 = st.columns(3)
                     qtd = c1.number_input("Qtd Chegada:", value=int(df.at[idx, 'qtd_comprada']))
@@ -1137,8 +1144,10 @@ if df is not None:
                         with st.form("edit_estoque_casa_full"):
                             st.markdown(f"### Detalhes do Registro")
                             c_dt, c_hr = st.columns(2)
-                            dt_reg = c_dt.date_input("Data da Entrada/Edição:", datetime.today())
-                            hr_reg = c_hr.time_input("Hora:", datetime.now().time())
+                            # AQUI ESTAVA O PROBLEMA DO PRINT (datetime.now) - CORRIGIDO
+                            dt_reg = c_dt.date_input("Data da Entrada/Edição:", obter_hora_manaus().date())
+                            hr_reg = c_hr.time_input("Hora:", obter_hora_manaus().time())
+                            
                             c_forn = st.text_input("Fornecedor desta entrada:", value=forn_atual)
                             st.markdown("---")
                             c_nome = st.text_input("Nome do Produto (Editável):", value=nome_atual)
