@@ -256,7 +256,7 @@ def carregar_lista_compras(prefixo_arquivo):
     try: return pd.read_excel(f"{prefixo_arquivo}_lista_compras.xlsx")
     except: return pd.DataFrame(columns=['produto', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status'])
 
-# --- FUNÇÃO XML INTELIGENTE ---
+# --- FUNÇÃO XML INTELIGENTE (ADAPTADA PARA NOVO FORMATO) ---
 def ler_xml_nfe(arquivo_xml, df_referencia):
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
@@ -264,15 +264,7 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
 
     dados_nota = {'numero': '', 'fornecedor': '', 'data': datetime.now(), 'itens': []}
 
-    for elem in root.iter():
-        tag = tag_limpa(elem)
-        if tag == 'nNF': dados_nota['numero'] = elem.text
-        elif tag == 'xNome' and dados_nota['fornecedor'] == '': dados_nota['fornecedor'] = elem.text
-        elif tag == 'dhEmi':
-            try: dados_nota['data'] = datetime.strptime(elem.text[:10], '%Y-%m-%d')
-            except: pass
-
-    # Prepara memória da base oficial
+    # Prepara memória da base oficial para busca
     lista_nomes_ref = []
     dict_ref_ean = {}
     if not df_referencia.empty:
@@ -281,6 +273,59 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
             ean = str(row['código de barras']).strip()
             dict_ref_ean[nm] = ean
             lista_nomes_ref.append(nm)
+
+    # === CASO 1: XML PERSONALIZADO (NotaFiscal) ===
+    if tag_limpa(root) == 'NotaFiscal':
+        info = root.find('Info')
+        if info is not None:
+            dados_nota['numero'] = info.find('NumeroNota').text if info.find('NumeroNota') is not None else ""
+            dados_nota['fornecedor'] = info.find('Fornecedor').text if info.find('Fornecedor') is not None else ""
+            try:
+                dados_nota['data'] = datetime.strptime(info.find('DataCompra').text, '%d/%m/%Y')
+            except: pass
+        
+        produtos = root.findall('.//Produtos/Item')
+        for item_xml in produtos:
+            item = {'codigo_interno': '', 'ean': '', 'nome': '', 'qtd': 0.0, 'preco_un_liquido': 0.0, 'preco_un_bruto': 0.0, 'desconto_total_item': 0.0}
+            
+            nome_raw = item_xml.find('Nome').text
+            qtd_raw = float(item_xml.find('Quantidade').text)
+            val_final = float(item_xml.find('ValorPagoFinal').text) # Total PAGO (Líquido)
+            desc_val = float(item_xml.find('ValorDesconto').text) # Desconto Total
+            cod_barras = item_xml.find('CodigoBarras').text
+
+            item['nome'] = normalizar_texto(nome_raw)
+            item['qtd'] = qtd_raw
+            item['ean'] = cod_barras if cod_barras else ""
+            item['codigo_interno'] = item['ean']
+            item['desconto_total_item'] = desc_val
+
+            if qtd_raw > 0:
+                # Reverte cálculo para achar o bruto (compatibilidade)
+                item['preco_un_liquido'] = val_final / qtd_raw
+                item['preco_un_bruto'] = (val_final + desc_val) / qtd_raw
+            
+            # Lógica de Busca Inteligente (Igual ao original)
+            ean_xml = str(item['ean']).strip()
+            if ean_xml in ['SEM GTIN', '', 'None', 'NAN']:
+                item['ean'] = item['codigo_interno']
+                if lista_nomes_ref:
+                    melhor_nome, _ = encontrar_melhor_match(item['nome'], lista_nomes_ref)
+                    if melhor_nome:
+                        item['ean'] = dict_ref_ean.get(melhor_nome, item['codigo_interno'])
+            
+            dados_nota['itens'].append(item)
+            
+        return dados_nota
+
+    # === CASO 2: XML PADRÃO NFE (CÓDIGO ORIGINAL) ===
+    for elem in root.iter():
+        tag = tag_limpa(elem)
+        if tag == 'nNF': dados_nota['numero'] = elem.text
+        elif tag == 'xNome' and dados_nota['fornecedor'] == '': dados_nota['fornecedor'] = elem.text
+        elif tag == 'dhEmi':
+            try: dados_nota['data'] = datetime.strptime(elem.text[:10], '%Y-%m-%d')
+            except: pass
 
     dets = [e for e in root.iter() if tag_limpa(e) == 'det']
     for det in dets:
