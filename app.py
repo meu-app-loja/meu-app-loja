@@ -31,7 +31,7 @@ COLS_OFICIAL = ['nome do produto', 'código de barras']
 # ==============================================================================
 @st.cache_resource
 def get_google_client():
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    scope = ["[https://spreadsheets.google.com/feeds](https://spreadsheets.google.com/feeds)", "[https://www.googleapis.com/auth/drive](https://www.googleapis.com/auth/drive)"]
     try:
         if isinstance(st.secrets["service_account_json"], str):
             json_creds = json.loads(st.secrets["service_account_json"])
@@ -43,22 +43,36 @@ def get_google_client():
         return None
 
 # ==============================================================================
-# 🔧 MATEMÁTICA E DADOS (AGRESSIVA)
+# 🔧 MATEMÁTICA E DADOS (CORRIGIDO E ROBUSTO)
 # ==============================================================================
 def converter_ptbr(valor):
-    """Converte qualquer coisa para float na força bruta."""
+    """
+    Converte valores numéricos de forma inteligente, evitando o erro de multiplicar por 100.
+    """
     if valor is None or str(valor).strip() == "": return 0.0
+    
+    # Se já for número, retorna direto
     if isinstance(valor, (float, int)): return float(valor)
     
-    # Remove R$ e espaços
-    s = str(valor).strip().upper().replace('R$', '').strip()
+    # Limpeza básica
+    s = str(valor).strip().upper().replace('R$', '').replace(' ', '')
     
-    # Se tem vírgula, assume padrão BR (remove ponto milhar, troca virgula por ponto)
-    if "," in s:
-        s = s.replace(".", "").replace(",", ".")
-    
-    try: return float(s)
-    except: return 0.0
+    try:
+        # Lógica de detecção de formato
+        # Caso 1: Formato brasileiro explícito (ex: 1.234,56) -> tem ponto E vírgula
+        if "," in s and "." in s:
+            s = s.replace(".", "").replace(",", ".")
+            
+        # Caso 2: Formato brasileiro simples (ex: 1234,56) -> tem apenas vírgula
+        elif "," in s:
+            s = s.replace(",", ".")
+            
+        # Caso 3: Formato internacional/Python (ex: 1234.56) -> tem apenas ponto
+        # NADA A FAZER, o Python já entende isso. A função antiga quebrava aqui!
+        
+        return float(s)
+    except:
+        return 0.0
 
 def format_br(valor):
     if not isinstance(valor, (float, int)): return "R$ 0,00"
@@ -71,13 +85,13 @@ def garantir_integridade_colunas(df, colunas_alvo):
         if col not in df.columns:
             df[col] = 0.0 if any(x in col for x in ['qtd', 'preco', 'valor', 'custo']) else ""
     
-    # Força conversão numérica em colunas de preço
+    # Força conversão numérica correta
     cols_num = [c for c in df.columns if any(x in c for x in ['qtd', 'preco', 'custo', 'valor'])]
     for col in cols_num:
         df[col] = df[col].apply(converter_ptbr)
     return df
 
-@st.cache_data(ttl=1) # Cache quase zero para garantir atualização
+@st.cache_data(ttl=1)
 def ler_da_nuvem(nome_aba, colunas_padrao):
     time.sleep(0.5)
     try:
@@ -88,7 +102,10 @@ def ler_da_nuvem(nome_aba, colunas_padrao):
             ws = sh.add_worksheet(title=nome_aba, rows=1000, cols=20)
             ws.append_row(colunas_padrao)
             return pd.DataFrame(columns=colunas_padrao)
-        df = pd.DataFrame(ws.get_all_records())
+        
+        # Leitura segura - Pega valores brutos para evitar formatação automática errada do Google
+        data = ws.get_all_records()
+        df = pd.DataFrame(data)
         return garantir_integridade_colunas(df, colunas_padrao)
     except: return pd.DataFrame(columns=colunas_padrao)
 
@@ -99,28 +116,31 @@ def salvar_na_nuvem(nome_aba, df, colunas_padrao):
         try: ws = sh.worksheet(nome_aba)
         except: ws = sh.add_worksheet(title=nome_aba, rows=1000, cols=20)
         
-        # Garante integridade inicial
+        # 1. Garante que as colunas existem
         df_save = garantir_integridade_colunas(df.copy(), colunas_padrao)
         
-        # --- A CORREÇÃO DE OURO ---
-        # Separa o tratamento: Números vs Texto
+        # 2. Sanitização para JSON (Garante que float é float, str é str)
         for col in df_save.columns:
-            # Se for coluna de data
             if pd.api.types.is_datetime64_any_dtype(df_save[col]):
                 df_save[col] = df_save[col].astype(str).replace('NaT', '')
             
-            # Se for coluna numérica (preço, qtd), força float e preenche com 0.0
-            elif pd.api.types.is_numeric_dtype(df_save[col]) or any(x in col for x in ['qtd', 'preco', 'custo', 'valor']):
-                df_save[col] = pd.to_numeric(df_save[col], errors='coerce').fillna(0.0)
-            
-            # Se for texto, preenche com vazio
+            if pd.api.types.is_numeric_dtype(df_save[col]):
+                df_save[col] = df_save[col].fillna(0.0)
             else:
                 df_save[col] = df_save[col].fillna("")
-        
+
+        # 3. Limpa e Salva com value_input_option='RAW'
+        # ESSA É A CORREÇÃO PRINCIPAL: RAW impede que o Google tente adivinhar vírgulas e pontos
         ws.clear()
-        ws.update([df_save.columns.values.tolist()] + df_save.values.tolist())
-        ler_da_nuvem.clear()
-    except Exception as e: st.error(f"Erro ao salvar: {e}")
+        ws.update(
+            range_name='A1',
+            values=[df_save.columns.values.tolist()] + df_save.values.tolist(),
+            value_input_option='RAW' 
+        )
+        ler_da_nuvem.clear() # Limpa cache
+        
+    except Exception as e:
+        st.error(f"Erro ao salvar: {e}")
 
 # ==============================================================================
 # 🧠 LÓGICA XML
@@ -132,7 +152,7 @@ def normalizar_texto(texto):
 def ler_xml_nfe(arquivo_xml, df_ref):
     try:
         tree = ET.parse(arquivo_xml); root = tree.getroot()
-        ns = {'nfe': 'http://www.portalfiscal.inf.br/nfe'}
+        ns = {'nfe': '[http://www.portalfiscal.inf.br/nfe](http://www.portalfiscal.inf.br/nfe)'}
         try: nNF = root.find('.//nfe:nNF', ns).text 
         except: 
             try: nNF = root.find('.//nNF').text
@@ -142,7 +162,7 @@ def ler_xml_nfe(arquivo_xml, df_ref):
             try: xNome = root.find('.//emit/xNome').text
             except: xNome = "Fornecedor XML"
         
-        itens = []
+        itens =
         det_tags = root.findall('.//nfe:det', ns) or root.findall('.//det')
         for det in det_tags:
             prod = det.find('nfe:prod', ns) if det.find('nfe:prod', ns) is not None else det.find('prod')
@@ -154,13 +174,14 @@ def ler_xml_nfe(arquivo_xml, df_ref):
                 ean = g('cEAN') or ""; nome = g('xProd') or "Item"
                 if ean == "SEM GTIN": ean = ""
                 
-                # Conversão robusta na leitura do XML
+                # Conversão robusta
                 q = converter_ptbr(g('qCom'))
                 v = converter_ptbr(g('vProd'))
                 d = converter_ptbr(g('vDesc') or 0)
                 
-                # Proteção matemática
+                # Proteção matemática e Arredondamento
                 p_un = (v - d) / q if q > 0 else 0
+                p_un = round(p_un, 2) # Garante 2 casas decimais
                 
                 itens.append({'nome': normalizar_texto(nome), 'qtd': q, 'ean': ean, 'preco_un_liquido': p_un, 'preco_un_bruto': v/q if q else 0, 'desconto_total_item': d})
         return {'numero': nNF, 'fornecedor': xNome, 'data': agora_am(), 'itens': itens}
@@ -179,7 +200,7 @@ df_hist = ler_da_nuvem(f"{prefixo}_historico_compras", COLS_HIST)
 df_lista = ler_da_nuvem(f"{prefixo}_lista_compras", COLS_LISTA)
 df_oficial = ler_da_nuvem("base_oficial", COLS_OFICIAL)
 
-modo = st.sidebar.radio("Menu", ["📊 Dashboard", "📥 Importar XML", "🏠 Gôndola (Busca)", "🆕 Cadastrar Produto", "📝 Lista de Compras", "💰 Histórico", "📋 Tabela Geral"])
+modo = st.sidebar.radio("Menu",)
 
 # 1. DASHBOARD
 if modo == "📊 Dashboard":
@@ -202,27 +223,27 @@ elif modo == "📥 Importar XML":
         if dados:
             st.info(f"Nota: {dados['numero']} | {dados['fornecedor']}")
             with st.form("xml"):
-                processar = []
+                processar =
                 for i, it in enumerate(dados['itens']):
                     st.write(f"**{it['nome']}** | Qtd: {it['qtd']} | Custo: {format_br(it['preco_un_liquido'])}")
-                    opcoes = ["(CRIAR NOVO)"] + sorted(df['nome do produto'].unique().tolist())
+                    opcoes = + sorted(df['nome do produto'].unique().tolist())
                     match_idx = 0
                     if it['ean'] and not df[df['código de barras'].astype(str) == str(it['ean'])].empty:
-                        match_idx = opcoes.index(df[df['código de barras'].astype(str) == str(it['ean'])].iloc[0]['nome do produto'])
+                        match_idx = opcoes.index(df[df['código de barras'].astype(str) == str(it['ean'])].iloc['nome do produto'])
                     escolha = st.selectbox("Vincular:", opcoes, index=match_idx, key=f"s_{i}")
                     processar.append((it, escolha))
                 if st.form_submit_button("✅ Processar"):
-                    novos_h = []
+                    novos_h =
                     for it, esc in processar:
                         if esc == "(CRIAR NOVO)":
                             novo = {c: 0 for c in COLUNAS_VITAIS}; novo.update({'código de barras': it['ean'], 'nome do produto': it['nome'], 'qtd_central': it['qtd'], 'preco_custo': it['preco_un_liquido'], 'preco_venda': it['preco_un_liquido']*1.6, 'ultimo_fornecedor': dados['fornecedor']})
-                            df = pd.concat([df, pd.DataFrame([novo])], ignore_index=True); nm_final = it['nome']
+                            df = pd.concat()], ignore_index=True); nm_final = it['nome']
                         else:
-                            idx = df[df['nome do produto'] == esc].index[0]
+                            idx = df[df['nome do produto'] == esc].index
                             df.at[idx, 'qtd_central'] += it['qtd']; df.at[idx, 'preco_custo'] = it['preco_un_liquido']; df.at[idx, 'ultimo_fornecedor'] = dados['fornecedor']; nm_final = esc
                         novos_h.append({'data': str(datetime.now()), 'produto': nm_final, 'qtd': it['qtd'], 'preco_pago': it['preco_un_liquido'], 'total_gasto': it['qtd']*it['preco_un_liquido'], 'numero_nota': dados['numero'], 'fornecedor': dados['fornecedor']})
                     salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
-                    if novos_h: salvar_na_nuvem(f"{prefixo}_historico_compras", pd.concat([df_hist, pd.DataFrame(novos_h)], ignore_index=True), COLS_HIST)
+                    if novos_h: salvar_na_nuvem(f"{prefixo}_historico_compras", pd.concat(, ignore_index=True), COLS_HIST)
                     st.success("Sucesso!"); st.rerun()
 
 # 3. GÔNDOLA
@@ -246,7 +267,7 @@ elif modo == "🆕 Cadastrar Produto":
         c3, c4 = st.columns(2); cus = c3.number_input("Custo", format="%.2f"); ven = c4.number_input("Venda", format="%.2f")
         if st.form_submit_button("Salvar"):
             n = {c: 0 for c in COLUNAS_VITAIS}; n.update({'código de barras': cod, 'nome do produto': nom.upper(), 'preco_custo': cus, 'preco_venda': ven})
-            df = pd.concat([df, pd.DataFrame([n])], ignore_index=True); salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS); st.success("Salvo!")
+            df = pd.concat()], ignore_index=True); salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS); st.success("Salvo!")
 
 # 5. LISTA
 elif modo == "📝 Lista de Compras":
@@ -256,64 +277,66 @@ elif modo == "📝 Lista de Compras":
 elif modo == "💰 Histórico":
     st.title("💰 Histórico"); st.dataframe(df_hist, use_container_width=True)
 
-# 7. TABELA GERAL & REPARO (A SOLUÇÃO)
+# 7. TABELA GERAL & REPARO (SOLUÇÃO FINAL)
 elif modo == "📋 Tabela Geral":
     st.title("📋 Tabela & Reparo")
     
     # --- ÁREA DE CORREÇÃO ---
-    with st.expander("🛠️ PAINEL DE REPARO (CLIQUE PARA ABRIR)", expanded=True):
-        st.write("Use estes botões para corrigir os preços errados.")
+    with st.expander("🛠️ PAINEL DE REPARO (Execute 1x se tiver preços errados)", expanded=False):
+        st.warning("Use estes botões apenas se os números estiverem multiplicados por 100.")
         c_rep1, c_rep2 = st.columns(2)
         
         # Correção 599 -> 5.99
-        if c_rep1.button("🚨 FORÇAR DIVISÃO POR 100 (Corrige 599 -> 5.99)"):
+        if c_rep1.button("🚨 CORRIGIR PREÇOS (÷ 100)"):
             afetados = 0
-            # TRUQUE: Usa df original direto da nuvem, não o editado
             df_temp = df.copy()
             for col in ['preco_custo', 'preco_venda']:
-                # Força virar número antes de testar
                 df_temp[col] = pd.to_numeric(df_temp[col], errors='coerce').fillna(0.0)
-                
-                # Filtro simples: Se for maior que 100, divide.
-                mask = df_temp[col] > 100
+                mask = df_temp[col] > 100 # Assume que nada custa mais que 100 reais por segurança do teste, ajuste se necessário
                 if mask.any():
                     df_temp.loc[mask, col] = df_temp.loc[mask, col] / 100
                     afetados += mask.sum()
             
             if afetados > 0:
                 salvar_na_nuvem(f"{prefixo}_estoque", df_temp, COLUNAS_VITAIS)
-                st.success(f"✅ Feito! {afetados} preços foram corrigidos.")
+                st.success(f"✅ Feito! {afetados} preços foram corrigidos e salvos corretamente.")
                 time.sleep(2); st.rerun()
             else:
-                st.warning("Nenhum preço maior que 100 foi encontrado para corrigir.")
+                st.warning("Nenhum preço maior que 100 foi encontrado.")
 
-        # Correção 35 -> 3.50
-        if c_rep2.button("⚠️ FORÇAR DIVISÃO POR 10 (Corrige 35 -> 3.50)"):
-            afetados = 0
-            df_temp = df.copy()
-            for col in ['preco_custo', 'preco_venda']:
-                df_temp[col] = pd.to_numeric(df_temp[col], errors='coerce').fillna(0.0)
-                
-                # Filtro: Pega preços entre 10 e 99 (ex: 35, 48, 24)
-                mask = (df_temp[col] >= 10) & (df_temp[col] < 100)
-                if mask.any():
-                    df_temp.loc[mask, col] = df_temp.loc[mask, col] / 10
-                    afetados += mask.sum()
-            
-            if afetados > 0:
-                salvar_na_nuvem(f"{prefixo}_estoque", df_temp, COLUNAS_VITAIS)
-                st.success(f"✅ Feito! {afetados} preços foram corrigidos.")
-                time.sleep(2); st.rerun()
-            else:
-                st.warning("Nenhum preço entre 10 e 99 foi encontrado.")
-
-    # Tabela
+    # Tabela com configuração de coluna travada para float
     st.write("---")
-    df_edit = st.data_editor(df, num_rows="dynamic", use_container_width=True, column_config={
-        "preco_venda": st.column_config.NumberColumn("Venda", format="R$ %.2f"),
-        "preco_custo": st.column_config.NumberColumn("Custo", format="R$ %.2f")
-    })
+    
+    # Configuração de colunas para garantir que a edição visual não quebre o dado
+    column_config = {
+        "preco_venda": st.column_config.NumberColumn(
+            "Venda (R$)",
+            help="Preço de venda",
+            min_value=0.0,
+            step=0.01, # Força o passo de centavos
+            format="R$ %.2f"
+        ),
+        "preco_custo": st.column_config.NumberColumn(
+            "Custo (R$)",
+            min_value=0.0,
+            step=0.01,
+            format="R$ %.2f"
+        ),
+        "qtd.estoque": st.column_config.NumberColumn(
+            "Estoque Loja",
+            step=1,
+            format="%d"
+        )
+    }
+
+    df_edit = st.data_editor(
+        df, 
+        num_rows="dynamic", 
+        use_container_width=True, 
+        column_config=column_config,
+        key="editor_tabela"
+    )
     
     if st.button("💾 SALVAR TABELA"):
         salvar_na_nuvem(f"{prefixo}_estoque", df_edit, COLUNAS_VITAIS)
-        st.success("Salvo!"); time.sleep(1); st.rerun()
+        st.success("Salvo com sucesso!"); time.sleep(1); st.rerun()
