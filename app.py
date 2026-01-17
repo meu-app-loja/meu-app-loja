@@ -43,14 +43,20 @@ def get_google_client():
         return None
 
 # ==============================================================================
-# 🔧 MATEMÁTICA E DADOS
+# 🔧 MATEMÁTICA E DADOS (AGRESSIVA)
 # ==============================================================================
 def converter_ptbr(valor):
+    """Converte qualquer coisa para float na força bruta."""
     if valor is None or str(valor).strip() == "": return 0.0
     if isinstance(valor, (float, int)): return float(valor)
+    
+    # Remove R$ e espaços
     s = str(valor).strip().upper().replace('R$', '').strip()
+    
+    # Se tem vírgula, assume padrão BR (remove ponto milhar, troca virgula por ponto)
     if "," in s:
         s = s.replace(".", "").replace(",", ".")
+    
     try: return float(s)
     except: return 0.0
 
@@ -65,12 +71,13 @@ def garantir_integridade_colunas(df, colunas_alvo):
         if col not in df.columns:
             df[col] = 0.0 if any(x in col for x in ['qtd', 'preco', 'valor', 'custo']) else ""
     
+    # Força conversão numérica em colunas de preço
     cols_num = [c for c in df.columns if any(x in c for x in ['qtd', 'preco', 'custo', 'valor'])]
     for col in cols_num:
         df[col] = df[col].apply(converter_ptbr)
     return df
 
-@st.cache_data(ttl=5)
+@st.cache_data(ttl=1) # Cache quase zero para garantir atualização
 def ler_da_nuvem(nome_aba, colunas_padrao):
     time.sleep(0.5)
     try:
@@ -104,7 +111,7 @@ def salvar_na_nuvem(nome_aba, df, colunas_padrao):
     except Exception as e: st.error(f"Erro ao salvar: {e}")
 
 # ==============================================================================
-# 🧠 LÓGICA XML & STRING
+# 🧠 LÓGICA XML
 # ==============================================================================
 def normalizar_texto(texto):
     if not isinstance(texto, str): return str(texto)
@@ -134,8 +141,16 @@ def ler_xml_nfe(arquivo_xml, df_ref):
                     return x.text if x is not None else None
                 ean = g('cEAN') or ""; nome = g('xProd') or "Item"
                 if ean == "SEM GTIN": ean = ""
-                q = converter_ptbr(g('qCom')); v = converter_ptbr(g('vProd')); d = converter_ptbr(g('vDesc') or 0)
-                itens.append({'nome': normalizar_texto(nome), 'qtd': q, 'ean': ean, 'preco_un_liquido': (v-d)/q if q else 0, 'preco_un_bruto': v/q if q else 0, 'desconto_total_item': d})
+                
+                # Conversão robusta na leitura do XML
+                q = converter_ptbr(g('qCom'))
+                v = converter_ptbr(g('vProd'))
+                d = converter_ptbr(g('vDesc') or 0)
+                
+                # Proteção matemática
+                p_un = (v - d) / q if q > 0 else 0
+                
+                itens.append({'nome': normalizar_texto(nome), 'qtd': q, 'ean': ean, 'preco_un_liquido': p_un, 'preco_un_bruto': v/q if q else 0, 'desconto_total_item': d})
         return {'numero': nNF, 'fornecedor': xNome, 'data': agora_am(), 'itens': itens}
     except Exception as e: st.error(f"Erro XML: {e}"); return None
 
@@ -159,7 +174,7 @@ if modo == "📊 Dashboard":
     st.title(f"📊 Painel - {loja_atual}")
     c1, c2, c3 = st.columns(3)
     qtd_total = df['qtd.estoque'].sum() + df['qtd_central'].sum()
-    valor_total = (df['qtd.estoque'] * df['preco_custo']).sum()
+    valor_total = (df['qtd.estoque'] * df['preco_custo']).sum() + (df['qtd_central'] * df['preco_custo']).sum()
     c1.metric("📦 Estoque Total", int(qtd_total))
     c2.metric("💰 Valor Estoque", format_br(valor_total))
     criticos = df[(df['qtd.estoque'] + df['qtd_central']) <= df['qtd_minima']]
@@ -229,52 +244,59 @@ elif modo == "📝 Lista de Compras":
 elif modo == "💰 Histórico":
     st.title("💰 Histórico"); st.dataframe(df_hist, use_container_width=True)
 
-# 7. TABELA GERAL & REPARO (SOLUÇÃO)
+# 7. TABELA GERAL & REPARO (A SOLUÇÃO)
 elif modo == "📋 Tabela Geral":
     st.title("📋 Tabela & Reparo")
     
     # --- ÁREA DE CORREÇÃO ---
-    with st.expander("🛠️ PAINEL DE REPARO DE PREÇOS", expanded=True):
+    with st.expander("🛠️ PAINEL DE REPARO (CLIQUE PARA ABRIR)", expanded=True):
+        st.write("Use estes botões para corrigir os preços errados.")
         c_rep1, c_rep2 = st.columns(2)
         
         # Correção 599 -> 5.99
-        if c_rep1.button("🚨 Corrigir '599' (÷ 100)"):
+        if c_rep1.button("🚨 FORÇAR DIVISÃO POR 100 (Corrige 599 -> 5.99)"):
             afetados = 0
-            # Força conversão para garantir que é número
+            # TRUQUE: Usa df original direto da nuvem, não o editado
+            df_temp = df.copy()
             for col in ['preco_custo', 'preco_venda']:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-                # Filtro: Maior que 50 (para pegar 599, 399, etc)
-                mask = df[col] > 50
+                # Força virar número antes de testar
+                df_temp[col] = pd.to_numeric(df_temp[col], errors='coerce').fillna(0.0)
+                
+                # Filtro simples: Se for maior que 100, divide.
+                mask = df_temp[col] > 100
                 if mask.any():
-                    df.loc[mask, col] = df.loc[mask, col] / 100
+                    df_temp.loc[mask, col] = df_temp.loc[mask, col] / 100
                     afetados += mask.sum()
             
             if afetados > 0:
-                salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
-                st.success(f"✅ Sucesso! {afetados} preços corrigidos (Ex: 599 virou 5.99).")
+                salvar_na_nuvem(f"{prefixo}_estoque", df_temp, COLUNAS_VITAIS)
+                st.success(f"✅ Feito! {afetados} preços foram corrigidos.")
                 time.sleep(2); st.rerun()
             else:
-                st.warning("Nenhum preço acima de 50 encontrado.")
+                st.warning("Nenhum preço maior que 100 foi encontrado para corrigir.")
 
         # Correção 35 -> 3.50
-        if c_rep2.button("⚠️ Corrigir '35' (÷ 10)"):
+        if c_rep2.button("⚠️ FORÇAR DIVISÃO POR 10 (Corrige 35 -> 3.50)"):
             afetados = 0
+            df_temp = df.copy()
             for col in ['preco_custo', 'preco_venda']:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-                # Filtro: Entre 10 e 50 (para pegar 35, 24, etc)
-                mask = (df[col] > 10) & (df[col] <= 50)
+                df_temp[col] = pd.to_numeric(df_temp[col], errors='coerce').fillna(0.0)
+                
+                # Filtro: Pega preços entre 10 e 99 (ex: 35, 48, 24)
+                mask = (df_temp[col] >= 10) & (df_temp[col] < 100)
                 if mask.any():
-                    df.loc[mask, col] = df.loc[mask, col] / 10
+                    df_temp.loc[mask, col] = df_temp.loc[mask, col] / 10
                     afetados += mask.sum()
             
             if afetados > 0:
-                salvar_na_nuvem(f"{prefixo}_estoque", df, COLUNAS_VITAIS)
-                st.success(f"✅ Sucesso! {afetados} preços corrigidos (Ex: 35 virou 3.50).")
+                salvar_na_nuvem(f"{prefixo}_estoque", df_temp, COLUNAS_VITAIS)
+                st.success(f"✅ Feito! {afetados} preços foram corrigidos.")
                 time.sleep(2); st.rerun()
             else:
-                st.warning("Nenhum preço suspeito entre 10 e 50 encontrado.")
+                st.warning("Nenhum preço entre 10 e 99 foi encontrado.")
 
     # Tabela
+    st.write("---")
     df_edit = st.data_editor(df, num_rows="dynamic", use_container_width=True, column_config={
         "preco_venda": st.column_config.NumberColumn("Venda", format="R$ %.2f"),
         "preco_custo": st.column_config.NumberColumn("Custo", format="R$ %.2f")
