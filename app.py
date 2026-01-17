@@ -99,31 +99,28 @@ def salvar_na_nuvem(nome_aba, df, colunas_padrao):
         try: ws = sh.worksheet(nome_aba)
         except: ws = sh.add_worksheet(title=nome_aba, rows=1000, cols=20)
         
-        # 1. Garante que as colunas existem
+        # Garante integridade inicial
         df_save = garantir_integridade_colunas(df.copy(), colunas_padrao)
         
-        # 2. Converte DATAS para texto (obrigatório para JSON)
+        # --- A CORREÇÃO DE OURO ---
+        # Separa o tratamento: Números vs Texto
         for col in df_save.columns:
+            # Se for coluna de data
             if pd.api.types.is_datetime64_any_dtype(df_save[col]):
                 df_save[col] = df_save[col].astype(str).replace('NaT', '')
-        
-        # 3. CORREÇÃO DO ERRO (O PULO DO GATO):
-        # Em vez de fillna("") geral, tratamos números diferente de texto
-        for col in df_save.columns:
-            if pd.api.types.is_numeric_dtype(df_save[col]):
-                # Se for número, vazio vira 0.0 (Mantém tipo float)
-                df_save[col] = df_save[col].fillna(0.0)
+            
+            # Se for coluna numérica (preço, qtd), força float e preenche com 0.0
+            elif pd.api.types.is_numeric_dtype(df_save[col]) or any(x in col for x in ['qtd', 'preco', 'custo', 'valor']):
+                df_save[col] = pd.to_numeric(df_save[col], errors='coerce').fillna(0.0)
+            
+            # Se for texto, preenche com vazio
             else:
-                # Se for texto, vazio vira "" (String)
                 df_save[col] = df_save[col].fillna("")
-
-        # 4. Limpa e Salva
+        
         ws.clear()
         ws.update([df_save.columns.values.tolist()] + df_save.values.tolist())
-        ler_da_nuvem.clear() # Limpa cache
-        
-    except Exception as e:
-        st.error(f"Erro ao salvar: {e}")
+        ler_da_nuvem.clear()
+    except Exception as e: st.error(f"Erro ao salvar: {e}")
 
 # ==============================================================================
 # 🧠 LÓGICA XML
@@ -320,4 +317,3 @@ elif modo == "📋 Tabela Geral":
     if st.button("💾 SALVAR TABELA"):
         salvar_na_nuvem(f"{prefixo}_estoque", df_edit, COLUNAS_VITAIS)
         st.success("Salvo!"); time.sleep(1); st.rerun()
-
