@@ -867,6 +867,14 @@ if df is not None:
                             atualizados = 0
                             novos_registros = []
                             bar = st.progress(0)
+                            
+                            # --- CORREÇÃO DE ORDEM CRONOLÓGICA ---
+                            try:
+                                df_vendas_temp[col_data] = pd.to_datetime(df_vendas_temp[col_data], dayfirst=True, errors='coerce')
+                                df_vendas_temp = df_vendas_temp.sort_values(by=col_data, ascending=True)
+                            except: pass
+                            # -------------------------------------
+
                             total = len(df_vendas_temp)
                             for i, row in df_vendas_temp.iterrows():
                                 nome = str(row[col_nome]).strip()
@@ -895,10 +903,20 @@ if df is not None:
                             st.success(f"✅ {atualizados} vendas baixadas!")
                 except Exception as e: st.error(f"Erro: {e}")
         with tab_hist_vendas:
+            # --- BOTÃO DE APAGAR HISTÓRICO (NOVO) ---
             if not df_vendas.empty:
+                if st.button("🗑️ Apagar Histórico de Vendas", type="primary"):
+                    df_vendas = pd.DataFrame(columns=['data_hora', 'produto', 'qtd_vendida', 'estoque_restante'])
+                    salvar_vendas(df_vendas, prefixo)
+                    st.success("Histórico limpo com sucesso!")
+                    st.rerun()
+                st.divider()
+                
                 busca_vendas_hist = st.text_input("🔍 Buscar no Histórico de Vendas:", placeholder="Ex: oleo...", key="busca_vendas_hist")
                 df_v_show = filtrar_dados_inteligente(df_vendas, 'produto', busca_vendas_hist)
                 st.dataframe(df_v_show.sort_values(by="data_hora", ascending=False), use_container_width=True, hide_index=True)
+            else:
+                st.info("Histórico de vendas vazio.")
 
     # 5. GÔNDOLA
     elif modo == "🏠 Gôndola (Loja)":
@@ -1144,10 +1162,8 @@ if df is not None:
                         with st.form("edit_estoque_casa_full"):
                             st.markdown(f"### Detalhes do Registro")
                             c_dt, c_hr = st.columns(2)
-                            # AQUI ESTAVA O PROBLEMA DO PRINT (datetime.now) - CORRIGIDO
                             dt_reg = c_dt.date_input("Data da Entrada/Edição:", obter_hora_manaus().date())
                             hr_reg = c_hr.time_input("Hora:", obter_hora_manaus().time())
-                            
                             c_forn = st.text_input("Fornecedor desta entrada:", value=forn_atual)
                             st.markdown("---")
                             c_nome = st.text_input("Nome do Produto (Editável):", value=nome_atual)
