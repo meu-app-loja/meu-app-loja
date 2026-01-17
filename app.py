@@ -738,112 +738,6 @@ if df is not None:
                     st.rerun()
             except Exception as e: st.error(f"Erro ao ler XML: {e}")
 
-    # 2.8 CONFIGURAR BASE OFICIAL
-    elif modo == "⚙️ Configurar Base Oficial":
-        st.title("⚙️ Configurar Base de Produtos Oficial")
-        st.markdown("""
-        Suba aqui o arquivo **product-2025...** exportado do sistema.
-        Isso ajuda o app a preencher os códigos de barras automaticamente quando o XML não trouxer.
-        """)
-        arquivo_base = st.file_uploader("Suba o arquivo Excel/CSV aqui", type=['xlsx', 'csv'])
-        if arquivo_base:
-            if st.button("🚀 Processar e Salvar Base"):
-                sucesso = processar_excel_oficial(arquivo_base)
-                if sucesso:
-                    st.success("Base Oficial atualizada com sucesso! Agora as importações de XML serão automáticas.")
-                    st.rerun()
-
-    # 3. SINCRONIZAR (CORRIGIDO: AGORA CRIA NOVOS PRODUTOS!)
-    elif modo == "🔄 Sincronizar (Planograma)":
-        st.title(f"🔄 Sincronizar - {loja_atual}")
-        st.info("💡 Este módulo agora IMPORTA produtos novos da planilha e atualiza os existentes.")
-        
-        arquivo = st.file_uploader("📂 Arquivo Planograma (XLSX ou CSV)", type=['xlsx', 'xls', 'csv'])
-        if arquivo:
-            try:
-                # Leitura robusta (CSV ou Excel)
-                if arquivo.name.endswith('.csv'):
-                    df_raw = pd.read_csv(arquivo, header=None)
-                else:
-                    df_raw = pd.read_excel(arquivo, header=None)
-                
-                st.write("Identifique as colunas:")
-                st.dataframe(df_raw.head())
-                cols = df_raw.columns.tolist()
-                
-                c1, c2, c3, c4 = st.columns(4)
-                idx_barras = c1.selectbox("Coluna CÓDIGO BARRAS", cols, index=0)
-                idx_nome = c2.selectbox("Coluna NOME DO PRODUTO", cols, index=1 if len(cols)>1 else 0)
-                idx_qtd = c3.selectbox("Coluna QUANTIDADE", cols, index=len(cols)-1)
-                opcoes_preco = ["(Não Atualizar Preço)"] + cols
-                idx_preco = c4.selectbox("Coluna PREÇO VENDA", opcoes_preco)
-                
-                if st.button("🚀 SINCRONIZAR TUDO (Importar + Atualizar)"):
-                    df = carregar_dados(prefixo)
-                    
-                    alt = 0
-                    novos = 0
-                    bar = st.progress(0)
-                    total_linhas = len(df_raw)
-                    novos_produtos = []
-
-                    start_row = 1 
-                    
-                    for i in range(start_row, total_linhas):
-                        try:
-                            cod = str(df_raw.iloc[i, idx_barras]).replace('.0', '').strip()
-                            nome_planilha = str(df_raw.iloc[i, idx_nome]).strip()
-                            qtd = pd.to_numeric(df_raw.iloc[i, idx_qtd], errors='coerce')
-                            
-                            nome_norm = normalizar_texto(nome_planilha)
-
-                            if cod and nome_norm and pd.notnull(qtd):
-                                mask = df['código de barras'] == cod
-                                
-                                if mask.any():
-                                    # ATUALIZA EXISTENTE
-                                    df.loc[mask, 'qtd.estoque'] = qtd
-                                    if idx_preco != "(Não Atualizar Preço)":
-                                        val_preco = pd.to_numeric(df_raw.iloc[i, idx_preco], errors='coerce')
-                                        if pd.notnull(val_preco):
-                                            df.loc[mask, 'preco_venda'] = val_preco
-                                    alt += 1
-                                else:
-                                    # CRIA NOVO (CORREÇÃO CRÍTICA APLICADA)
-                                    novo_preco_venda = 0.0
-                                    if idx_preco != "(Não Atualizar Preço)":
-                                        val_p = pd.to_numeric(df_raw.iloc[i, idx_preco], errors='coerce')
-                                        if pd.notnull(val_p): novo_preco_venda = val_p
-                                    
-                                    novo_prod = {
-                                        'código de barras': cod,
-                                        'nome do produto': nome_norm,
-                                        'qtd.estoque': qtd,
-                                        'qtd_central': 0,
-                                        'qtd_minima': 5,
-                                        'validade': None,
-                                        'status_compra': 'OK',
-                                        'qtd_comprada': 0,
-                                        'preco_custo': 0.0,
-                                        'preco_venda': novo_preco_venda,
-                                        'categoria': 'GERAL',
-                                        'ultimo_fornecedor': '',
-                                        'preco_sem_desconto': 0.0
-                                    }
-                                    novos_produtos.append(novo_prod)
-                                    novos += 1
-                        except: pass
-                        bar.progress((i+1)/total_linhas)
-                    
-                    if novos_produtos:
-                        df = pd.concat([df, pd.DataFrame(novos_produtos)], ignore_index=True)
-                    
-                    salvar_estoque(df, prefixo)
-                    st.success(f"✅ Sucesso! {alt} produtos atualizados e {novos} NOVOS produtos cadastrados (incluindo a Coca Cola 2L!).")
-                    if novos > 0:
-                        st.balloons()
-            except Exception as e: st.error(f"Erro: {e}")
-
     # 4. BAIXAR VENDAS
     elif modo == "📉 Baixar Vendas (Do Relatório)":
         st.title(f"📉 Importar Vendas - {loja_atual}")
@@ -1059,6 +953,16 @@ if df is not None:
                 df_hist_visual = filtrar_dados_inteligente(df_hist, 'produto', busca_hist_precos)
                 if df_hist_visual.empty: 
                     df_hist_visual = filtrar_dados_inteligente(df_hist, 'fornecedor', busca_hist_precos)
+            
+            # --- CRIAÇÃO DO MAPA DE CÓDIGOS PARA VISUALIZAÇÃO ---
+            mapa_ean = dict(zip(df['nome do produto'], df['código de barras']))
+            df_hist_visual['código_barras'] = df_hist_visual['produto'].map(mapa_ean)
+            # Reorganiza colunas para o código aparecer no começo
+            cols = ['data', 'código_barras', 'produto', 'fornecedor', 'qtd', 'preco_sem_desconto', 'desconto_total_money', 'preco_pago', 'total_gasto']
+            cols = [c for c in cols if c in df_hist_visual.columns]
+            df_hist_visual = df_hist_visual[cols]
+            # ----------------------------------------------------
+
             st.info("✅ Você pode editar ou **excluir** linhas (selecione a linha e aperte Delete).")
             df_editado = st.data_editor(
                 df_hist_visual.sort_values(by='data', ascending=False), 
@@ -1066,6 +970,7 @@ if df is not None:
                 key="editor_historico_geral",
                 num_rows="dynamic", 
                 column_config={
+                    "código_barras": st.column_config.TextColumn("Cód. Barras", disabled=True),
                     "preco_sem_desconto": st.column_config.NumberColumn("Preço Tabela", format="R$ %.2f"),
                     "desconto_total_money": st.column_config.NumberColumn("Desconto TOTAL", format="R$ %.2f"),
                     "preco_pago": st.column_config.NumberColumn("Pago (Unit)", format="R$ %.2f", disabled=True),
@@ -1079,6 +984,11 @@ if df is not None:
                 if indices_removidos:
                     df_hist = df_hist.drop(indices_removidos)
                     st.warning(f"🗑️ {len(indices_removidos)} registros excluídos permanentemente.")
+                
+                # Remove a coluna temporária antes de salvar para não sujar o original
+                if 'código_barras' in df_editado.columns:
+                    df_editado = df_editado.drop(columns=['código_barras'])
+                
                 df_hist.update(df_editado)
                 for idx, row in df_hist.iterrows():
                     try:
@@ -1107,7 +1017,8 @@ if df is not None:
                     df_show = filtrar_dados_inteligente(df, 'nome do produto', busca_central)
                     for idx, row in df_show.iterrows():
                         with st.container(border=True):
-                            st.write(f"**{row['nome do produto']}**")
+                            # --- AJUSTE VISUAL: CÓDIGO NO CARD ---
+                            st.write(f"📝 {row['código de barras']} | **{row['nome do produto']}**")
                             col1, col2 = st.columns(2)
                             nova_qtd = col1.number_input(f"Qtd Casa:", value=int(row['qtd_central']), key=f"q_{idx}")
                             novo_custo = col2.number_input(f"Custo:", value=float(row['preco_custo']), key=f"c_{idx}")
@@ -1121,7 +1032,8 @@ if df is not None:
                 else:
                     st.info("✏️ Se precisar corrigir o estoque, edite abaixo e clique em SALVAR.")
                     busca_central = st.text_input("🔍 Buscar Produto na Casa:", placeholder="Ex: oleo concordia...", key="busca_central")
-                    colunas_visiveis = ['nome do produto', 'qtd_central', 'validade', 'preco_custo', 'ultimo_fornecedor']
+                    # --- AJUSTE VISUAL: COLUNA CÓDIGO ---
+                    colunas_visiveis = ['código de barras', 'nome do produto', 'qtd_central', 'validade', 'preco_custo', 'ultimo_fornecedor']
                     df_visual = filtrar_dados_inteligente(df, 'nome do produto', busca_central)[colunas_visiveis]
                     df_editado = st.data_editor(df_visual, use_container_width=True, num_rows="dynamic", key="edit_casa")
                     if st.button("💾 SALVAR CORREÇÕES DA TABELA"):
@@ -1163,7 +1075,9 @@ if df is not None:
                             st.markdown(f"### Detalhes do Registro")
                             c_dt, c_hr = st.columns(2)
                             dt_reg = c_dt.date_input("Data da Entrada/Edição:", obter_hora_manaus().date())
-                            hr_reg = c_hr.time_input("Hora:", obter_hora_manaus().time())
+                            # --- AJUSTE DO RELÓGIO (STEP=60) ---
+                            hr_reg = c_hr.time_input("Hora:", obter_hora_manaus().time(), step=60)
+                            
                             c_forn = st.text_input("Fornecedor desta entrada:", value=forn_atual)
                             st.markdown("---")
                             c_nome = st.text_input("Nome do Produto (Editável):", value=nome_atual)
