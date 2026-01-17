@@ -33,64 +33,41 @@ COLS_VENDAS = ['data_hora', 'produto', 'qtd_vendida', 'estoque_restante']
 COLS_LISTA = ['produto', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status']
 COLS_OFICIAL = ['nome do produto', 'código de barras']
 
-# --- CONEXÃO SEGURA ---
+# --- CONEXÃO SEGURA (AJUSTADA PARA O NOVO SECRETS) ---
 @st.cache_resource
 def get_google_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    json_creds = json.loads(st.secrets["service_account_json"])
+    
+    # AJUSTE TÉCNICO: Lê o formato TOML corretamente como dicionário
+    try:
+        json_creds = dict(st.secrets["service_account_json"])
+    except:
+        # Fallback caso esteja em formato string antiga
+        json_creds = json.loads(st.secrets["service_account_json"])
+        
     creds = ServiceAccountCredentials.from_json_keyfile_dict(json_creds, scope)
     return gspread.authorize(creds)
 
-# --- FUNÇÃO DE LIMPEZA E CONVERSÃO DE NÚMEROS (CORRIGIDA) ---
+# --- FUNÇÃO DE MATEMÁTICA BLINDADA (FIM DO ERRO 349) ---
 def converter_ptbr(valor):
     """
-    Converte valores mantendo a precisão decimal.
-    Corrige casos que viravam 799 ao invés de 7.99.
-
-    Regras:
-      - Se tiver vírgula: assume padrão BR (remove milhar '.' e troca ',' por '.')
-      - Se não tiver vírgula: assume padrão internacional (mantém '.' como decimal)
-      - Se tiver ambos (1,234.56 ou 1.234,56), decide pelo separador que aparece por último
-      - Remove lixo (R$, espaços, etc.) com regex
+    Corrige erro onde 3.49 virava 349.
+    Aceita tanto ponto quanto vírgula como decimal.
     """
-    if valor is None:
-        return 0.0
+    if valor is None or str(valor).strip() == "": return 0.0
+    
+    # Se já é número, devolve número
+    if isinstance(valor, (float, int)): return float(valor)
 
-    try:
-        if pd.isna(valor) or str(valor).strip() == "":
-            return 0.0
-    except:
-        pass
-
-    if isinstance(valor, (float, int)):
-        return float(valor)
-
+    # Limpa R$ e espaços
     s = str(valor).strip().upper().replace('R$', '').strip()
-    # mantém apenas dígitos, ponto, vírgula e sinal
-    s = re.sub(r"[^\d\.,\-]", "", s)
-
-    if s in {"", "-", ".", ","}:
-        return 0.0
-
+    
+    # Lógica: Se tem vírgula, assume Brasil (tira ponto de milhar, põe ponto decimal)
+    if "," in s:
+        s = s.replace(".", "") # Tira milhar (1.000 -> 1000)
+        s = s.replace(",", ".") # Vírgula vira ponto (1000,00 -> 1000.00)
+    
     try:
-        # Caso com ponto e vírgula: decimal é o separador que aparece por último
-        if "," in s and "." in s:
-            if s.rfind(",") > s.rfind("."):
-                # 1.234,56 -> 1234.56
-                s = s.replace(".", "")
-                s = s.replace(",", ".")
-            else:
-                # 1,234.56 -> 1234.56
-                s = s.replace(",", "")
-
-        # Se tiver vírgula e não tiver ponto: 7,99 -> 7.99
-        elif "," in s:
-            s = s.replace(".", "")   # segurança: remove qualquer ponto perdido
-            s = s.replace(",", ".")
-
-        # Se NÃO tiver vírgula: padrão internacional (7.99). Não remove ponto.
-        # (mantém como está)
-
         return float(s)
     except:
         return 0.0
@@ -152,6 +129,8 @@ def ler_da_nuvem(nome_aba, colunas_padrao):
 
         return df
     except Exception as e:
+        # Se der erro de conexão, mostra aviso amigável
+        st.error(f"Erro ao conectar na planilha '{nome_aba}': {e}")
         return pd.DataFrame(columns=colunas_padrao)
 
 # --- SALVAR NA NUVEM (CORRIGIDO PARA HORA E NÚMEROS) ---
