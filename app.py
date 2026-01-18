@@ -165,6 +165,16 @@ elif loja_atual == "Loja 2 (Filial)": prefixo = "loja2"
 else: prefixo = "loja3"
 
 # --- FUNÇÕES AUXILIARES ---
+def formatar_moeda_br(valor):
+    """Transforma 1031.28 em 1.031,28"""
+    try:
+        # Formata padrão americano (com vírgula no milhar)
+        s = f"{valor:,.2f}"
+        # Troca vírgula por X, ponto por vírgula, X por ponto
+        return s.replace(",", "X").replace(".", ",").replace("X", ".")
+    except:
+        return f"{valor:.2f}"
+
 def filtrar_dados_inteligente(df, coluna_busca, texto_busca):
     if not texto_busca: return df
     # Busca simples (substring)
@@ -421,7 +431,8 @@ if df is not None:
             
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("📦 Itens na Loja", int(df['qtd.estoque'].sum()))
-            c2.metric("💰 Valor Investido", f"R$ {valor_estoque:,.2f}")
+            # AQUI ESTÁ A CORREÇÃO DA FORMATAÇÃO DO DINHEIRO
+            c2.metric("💰 Valor Investido", f"R$ {formatar_moeda_br(valor_estoque)}")
             c3.metric("🚨 Vencendo (5 dias)", len(df_critico))
             c4.metric("⚠️ Atenção (10 dias)", len(df_atencao))
             st.divider()
@@ -431,8 +442,18 @@ if df is not None:
                 st.warning(f"🚨 Existem {len(baixo_estoque)} produtos com estoque baixo! Vá em 'Lista de Compras' para ver.")
                 
             if not df_critico.empty:
-                st.error("🚨 Produtos Vencendo!")
-                st.dataframe(df_critico[['nome do produto', 'validade', 'qtd.estoque']])
+                st.error("🚨 Produtos Vencendo! (Edite a data abaixo para corrigir)")
+                # AQUI ESTÁ A CORREÇÃO PARA EDITAR A DATA E REMOVER DO ALERTA
+                df_critico_edit = st.data_editor(
+                    df_critico[['nome do produto', 'validade', 'qtd.estoque']],
+                    use_container_width=True,
+                    key="editor_vencimento"
+                )
+                if st.button("💾 ATUALIZAR DATAS DE VENCIMENTO"):
+                    df.update(df_critico_edit)
+                    salvar_estoque(df, prefixo)
+                    st.success("Datas atualizadas com sucesso!")
+                    st.rerun()
 
     # 1.5 MÓDULO: TRANSFERÊNCIA VIA PICKLIST
     elif modo == "🚚 Transferência em Massa (Picklist)":
@@ -1151,5 +1172,3 @@ if df is not None:
                     st.success(f"✅ Mágica feita! {qtd_antes - qtd_depois} produtos duplicados foram unidos e os nomes corrigidos.")
                     st.balloons()
                     st.rerun()
-
-
