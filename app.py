@@ -1081,10 +1081,16 @@ if df is not None:
         with tab_gerenciar:
             st.info("Adicione mercadoria manualmente (ex: compra sem pedido) ou edite dados.")
             if not df.empty:
-                lista_prods = sorted(df['nome do produto'].astype(str).unique().tolist())
-                prod_opcao = st.selectbox("Selecione o Produto:", lista_prods)
+                # --- ALTERAÇÃO AQUI: LISTA COM CÓDIGO DE BARRAS PARA VISUALIZAÇÃO ---
+                lista_visuais = (df['código de barras'].astype(str) + " - " + df['nome do produto'].astype(str)).unique().tolist()
+                lista_visuais = sorted(lista_visuais)
+                
+                prod_opcao = st.selectbox("Selecione o Produto:", lista_visuais)
+                
                 if prod_opcao:
-                    mask = df['nome do produto'].astype(str) == str(prod_opcao)
+                    # Recria a lógica de busca baseada na string composta
+                    mask = (df['código de barras'].astype(str) + " - " + df['nome do produto'].astype(str)) == prod_opcao
+                    
                     if mask.any():
                         idx_prod = df[mask].index[0]
                         nome_atual = df.at[idx_prod, 'nome do produto']
