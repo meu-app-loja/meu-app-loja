@@ -426,7 +426,7 @@ if df is not None:
             else:
                 st.success("Nenhum produto vencendo nos próximos 5 dias.")
 
-    # 1.2 MÓDULO: CONCILIAÇÃO (NOVO)
+    # 1.2 MÓDULO: CONCILIAÇÃO (NOVO E CORRIGIDO PARA NOMES DO EXCEL)
     elif modo == "⚖️ Conciliação (Shoppbud vs App)":
         st.title("⚖️ Conciliação de Estoque")
         st.markdown("""
@@ -439,9 +439,10 @@ if df is not None:
         if arq_planograma:
             try:
                 df_plan = pd.read_excel(arq_planograma)
-                # Tenta achar colunas
-                col_cod_plan = next((c for c in df_plan.columns if 'código' in c.lower() and 'barras' in c.lower()), None)
+                # --- CORREÇÃO: BUSCA INTELIGENTE DE COLUNAS (COM OU SEM ACENTO) ---
+                col_cod_plan = next((c for c in df_plan.columns if ('código' in c.lower() or 'codigo' in c.lower()) and 'barras' in c.lower()), None)
                 col_qtd_plan = next((c for c in df_plan.columns if 'qtd' in c.lower() and 'estoque' in c.lower()), None)
+                # ------------------------------------------------------------------
                 
                 if col_cod_plan and col_qtd_plan:
                     # Preparar comparação
@@ -522,7 +523,7 @@ if df is not None:
                                     mime="application/vnd.ms-excel"
                                 )
                 else:
-                    st.error("Não encontrei colunas 'Código de Barras' e 'Qtd Estoque' no arquivo.")
+                    st.error(f"Não encontrei colunas 'Código de Barras' ou 'Codigo de Barras' e 'Qtd Estoque' no arquivo. Colunas encontradas: {df_plan.columns.tolist()}")
             except Exception as e: st.error(f"Erro ao ler arquivo: {e}")
 
 
