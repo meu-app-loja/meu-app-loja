@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 import os
 import xml.etree.ElementTree as ET
 import unicodedata
-import difflib
 from io import BytesIO
 
 # Configuração da página
@@ -164,6 +163,29 @@ def registrar_auditoria(prefixo, produto, qtd_antes, qtd_nova, acao, motivo="Man
     except Exception as e:
         print(f"Erro ao salvar log: {e}")
 
+# --- 🔐 MEMÓRIA DE VENDAS PROCESSADAS (NOVO) ---
+def carregar_ids_processados(prefixo):
+    """Carrega lista de IDs de vendas já baixadas para evitar duplicidade."""
+    arquivo = f"{prefixo}_ids_vendas.csv"
+    if os.path.exists(arquivo):
+        try:
+            df_ids = pd.read_csv(arquivo)
+            return set(df_ids['id_transacao'].astype(str).tolist())
+        except: return set()
+    return set()
+
+def salvar_ids_processados(prefixo, novos_ids):
+    """Salva novos IDs na lista de processados."""
+    arquivo = f"{prefixo}_ids_vendas.csv"
+    if not novos_ids: return
+    df_novo = pd.DataFrame({'id_transacao': list(novos_ids)})
+    if os.path.exists(arquivo):
+        df_antigo = pd.read_csv(arquivo)
+        df_final = pd.concat([df_antigo, df_novo]).drop_duplicates()
+    else:
+        df_final = df_novo
+    df_final.to_csv(arquivo, index=False)
+
 def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, nova_validade, prefixo_ignorar):
     todas_lojas = ["loja1", "loja2", "loja3"]
     for loja in todas_lojas:
@@ -194,7 +216,7 @@ def inicializar_arquivos(prefixo):
         f"{prefixo}_movimentacoes.xlsx": ['data_hora', 'produto', 'qtd_movida'],
         f"{prefixo}_vendas.xlsx": ['data_hora', 'produto', 'qtd_vendida', 'estoque_restante'],
         f"{prefixo}_lista_compras.xlsx": ['produto', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status'],
-        f"{prefixo}_log_auditoria.xlsx": ['data_hora', 'produto', 'qtd_antes', 'qtd_nova', 'acao', 'motivo'] # Novo arquivo de log
+        f"{prefixo}_log_auditoria.xlsx": ['data_hora', 'produto', 'qtd_antes', 'qtd_nova', 'acao', 'motivo']
     }
     for arquivo, colunas in arquivos.items():
         if not os.path.exists(arquivo):
@@ -355,6 +377,7 @@ df_mov = carregar_movimentacoes(prefixo)
 df_vendas = carregar_vendas(prefixo)
 df_oficial = carregar_base_oficial()
 df_lista_compras = carregar_lista_compras(prefixo)
+ids_processados = carregar_ids_processados(prefixo) # Carrega IDs já baixados
 
 if df is not None:
     st.sidebar.title("🏪 Menu")
@@ -508,7 +531,8 @@ if df is not None:
                             df_export = df_divergente[~df_editor_concilia['✅ Aceitar Qtd Shoppbud (Corrigir App)']].copy()
                             if not df_export.empty:
                                 buffer = BytesIO()
-                                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                                # --- CORREÇÃO: USAR ENGINE PADRÃO (SEM XLSXWRITER OBRIGATÓRIO) ---
+                                with pd.ExcelWriter(buffer) as writer:
                                     # Formato simples para importar no Shoppbud
                                     df_export_final = pd.DataFrame({
                                         'Código de Barras': df_export['código normalizado'],
@@ -972,11 +996,21 @@ if df is not None:
                         st.balloons()
             except Exception as e: st.error(f"Erro: {e}")
 
-    # 4. BAIXAR VENDAS
+    # 4. BAIXAR VENDAS (COM TRAVA DE DATA)
     elif modo == "📉 Baixar Vendas (Do Relatório)":
         st.title(f"📉 Importar Vendas - {loja_atual}")
         tab_imp, tab_hist_vendas = st.tabs(["📂 Importar Arquivo", "📜 Histórico"])
         with tab_imp:
+            st.info("💡 DICA: Use o filtro de data abaixo para ignorar vendas antigas que possam estar 'escondidas' no Excel.")
+            
+            # --- FILTRO DE DATA ---
+            c_dt, c_hr = st.columns(2)
+            data_corte = c_dt.date_input("🚫 Ignorar vendas ANTES do dia:", value=obter_hora_manaus().date())
+            hora_corte = c_hr.time_input("⏰ E antes do horário:", value=datetime.strptime("19:00", "%H:%M").time(), step=60)
+            data_hora_corte = datetime.combine(data_corte, hora_corte)
+            st.warning(f"O sistema irá processar APENAS vendas feitas DEPOIS de: **{data_hora_corte.strftime('%d/%m/%Y %H:%M')}**")
+            # ----------------------
+
             arquivo_vendas = st.file_uploader("📂 Relatório de Vendas", type=['xlsx', 'xls'], key="up_vendas")
             if arquivo_vendas:
                 try:
@@ -986,14 +1020,20 @@ if df is not None:
                     arquivo_vendas.seek(0)
                     df_vendas_temp = pd.read_excel(arquivo_vendas, header=linha_titulo)
                     cols = df_vendas_temp.columns.tolist()
-                    c1, c2, c3 = st.columns(3)
-                    col_nome = c1.selectbox("Coluna NOME?", cols)
-                    col_qtd = c2.selectbox("Coluna QUANTIDADE?", cols)
-                    col_data = c3.selectbox("Coluna DATA?", cols)
+                    
+                    c1, c2, c3, c4 = st.columns(4)
+                    col_id = c1.selectbox("Coluna ID TRANSAÇÃO (Opcional)", ["(Ignorar)"] + cols)
+                    col_nome = c2.selectbox("Coluna NOME?", cols)
+                    col_qtd = c3.selectbox("Coluna QUANTIDADE?", cols)
+                    col_data = c4.selectbox("Coluna DATA?", cols)
+                    
                     if st.button("🚀 PROCESSAR VENDAS"):
                         if not df.empty:
                             atualizados = 0
+                            ignorados_data = 0
+                            ignorados_id = 0
                             novos_registros = []
+                            novos_ids_processados = set()
                             bar = st.progress(0)
                             
                             # --- CORREÇÃO DE ORDEM CRONOLÓGICA ---
@@ -1005,13 +1045,27 @@ if df is not None:
 
                             total = len(df_vendas_temp)
                             for i, row in df_vendas_temp.iterrows():
+                                # 1. Filtro de ID (Duplicidade)
+                                if col_id != "(Ignorar)":
+                                    id_venda = str(row[col_id]).strip()
+                                    if id_venda in ids_processados or id_venda in novos_ids_processados:
+                                        ignorados_id += 1
+                                        continue
+                                    
                                 nome = str(row[col_nome]).strip()
                                 qtd = pd.to_numeric(row[col_qtd], errors='coerce')
                                 try:
                                     dt_v = pd.to_datetime(row[col_data], dayfirst=True)
                                     if pd.isna(dt_v): dt_v = obter_hora_manaus()
                                 except: dt_v = obter_hora_manaus()
+
+                                # 2. Filtro de Data (Segurança)
+                                if dt_v < data_hora_corte:
+                                    ignorados_data += 1
+                                    continue # Pula essa linha
+
                                 if pd.isna(qtd) or qtd <= 0: continue
+                                
                                 mask = (df['código de barras'].astype(str).str.contains(nome, na=False) |
                                         df['nome do produto'].astype(str).str.contains(nome, case=False, na=False))
                                 if mask.any():
@@ -1023,12 +1077,25 @@ if df is not None:
                                         "data_hora": dt_v, "produto": df.at[idx, 'nome do produto'],
                                         "qtd_vendida": qtd, "estoque_restante": df.at[idx, 'qtd.estoque']
                                     })
+                                    if col_id != "(Ignorar)":
+                                        novos_ids_processados.add(str(row[col_id]).strip())
+                                        
                                 bar.progress((i+1)/total)
+                            
                             salvar_estoque(df, prefixo)
+                            salvar_ids_processados(prefixo, novos_ids_processados) # Salva IDs
+                            
                             if novos_registros:
                                 df_vendas = pd.concat([df_vendas, pd.DataFrame(novos_registros)], ignore_index=True)
                                 salvar_vendas(df_vendas, prefixo)
-                            st.success(f"✅ {atualizados} vendas baixadas!")
+                            
+                            msg_final = f"✅ {atualizados} vendas baixadas com sucesso!"
+                            if ignorados_data > 0:
+                                msg_final += f"\n\n🛡️ {ignorados_data} vendas antigas ignoradas (Antes de {data_hora_corte.strftime('%H:%M')})."
+                            if ignorados_id > 0:
+                                msg_final += f"\n\n♻️ {ignorados_id} vendas duplicadas ignoradas."
+                                
+                            st.success(msg_final)
                 except Exception as e: st.error(f"Erro: {e}")
         with tab_hist_vendas:
             # --- BOTÃO DE APAGAR HISTÓRICO ---
@@ -1036,6 +1103,9 @@ if df is not None:
                 if st.button("🗑️ Apagar Histórico de Vendas", type="primary"):
                     df_vendas = pd.DataFrame(columns=['data_hora', 'produto', 'qtd_vendida', 'estoque_restante'])
                     salvar_vendas(df_vendas, prefixo)
+                    # Limpa IDs também
+                    try: os.remove(f"{prefixo}_ids_vendas.csv")
+                    except: pass
                     st.success("Histórico limpo com sucesso!")
                     st.rerun()
                 st.divider()
