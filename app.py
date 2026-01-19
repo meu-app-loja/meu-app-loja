@@ -738,7 +738,7 @@ if df is not None:
                 
                 data_xml_padrao = dados['data'].date() if dados['data'] else obter_hora_manaus().date()
                 data_escolhida = c_data.date_input("📅 Data da Compra/Entrada (Histórico):", value=data_xml_padrao)
-                # Ajuste: Apenas value=hora_padrao, sem conversões automáticas
+                # Ajuste: Apenas value=hora_padrao, sem conversões automáticas e step=60
                 hora_escolhida = c_hora.time_input("⏰ Hora:", value=hora_padrao, step=60)
                 
                 data_final_historico = datetime.combine(data_escolhida, hora_escolhida)
@@ -1259,7 +1259,7 @@ if df is not None:
                         df.at[idx, 'preco_venda'] = venda
                         df.at[idx, 'status_compra'] = 'OK'
                         df.at[idx, 'qtd_comprada'] = 0
-                        df.at[idx, 'ultimo_fornecedor'] = forn_compra 
+                        df.at[idx, 'ultimo_fornecedor'] = forn_compra
                         salvar_estoque(df, prefixo)
                         atualizar_casa_global(item, df.at[idx, 'qtd_central'], custo, venda, None, prefixo)
                         dt_full = datetime.combine(dt_compra, hr_compra)
@@ -1278,7 +1278,7 @@ if df is not None:
             df_hist_visual = df_hist
             if busca_hist_precos:
                 df_hist_visual = filtrar_dados_inteligente(df_hist, 'produto', busca_hist_precos)
-                if df_hist_visual.empty: 
+                if df_hist_visual.empty: 
                     df_hist_visual = filtrar_dados_inteligente(df_hist, 'fornecedor', busca_hist_precos)
             
             # --- CRIAÇÃO DO MAPA DE CÓDIGOS PARA VISUALIZAÇÃO ---
@@ -1292,10 +1292,10 @@ if df is not None:
 
             st.info("✅ Você pode editar ou **excluir** linhas (selecione a linha e aperte Delete).")
             df_editado = st.data_editor(
-                df_hist_visual.sort_values(by='data', ascending=False), 
-                use_container_width=True, 
+                df_hist_visual.sort_values(by='data', ascending=False), 
+                use_container_width=True, 
                 key="editor_historico_geral",
-                num_rows="dynamic", 
+                num_rows="dynamic", 
                 column_config={
                     "código_barras": st.column_config.TextColumn("Cód. Barras", disabled=True),
                     "preco_sem_desconto": st.column_config.NumberColumn("Preço Tabela", format="R$ %.2f"),
@@ -1405,9 +1405,7 @@ if df is not None:
                             st.markdown(f"### Detalhes do Registro")
                             c_dt, c_hr = st.columns(2)
                             dt_reg = c_dt.date_input("Data da Entrada/Edição:", obter_hora_manaus().date())
-                            # --- CORREÇÃO HORA ---
-                            hr_reg = c_hr.time_input("Hora:", value=obter_hora_manaus().time(), step=60)
-                            # ---------------------
+                            hr_reg = c_hr.time_input("Hora:", value=obter_hora_manaus().time(), step=60) # STEP 60
                             
                             c_forn = st.text_input("Fornecedor desta entrada:", value=forn_atual)
                             st.markdown("---")
