@@ -270,8 +270,7 @@ def carregar_lista_compras(prefixo_arquivo):
     try:
         df = pd.read_excel(f"{prefixo_arquivo}_lista_compras.xlsx")
         # Garante que a coluna código de barras exista
-        if 'código_barras' not in df.columns:
-            df['código_barras'] = ""
+        if 'código_barras' not in df.columns: df['código_barras'] = ""
         return df
     except: return pd.DataFrame()
 
@@ -386,7 +385,6 @@ ids_processados = carregar_ids_processados(prefixo) # Carrega IDs já baixados
 
 if df is not None:
     st.sidebar.title("🏪 Menu")
-    # MENU ATUALIZADO: REMOVIDO "FORNECEDOR"
     modo = st.sidebar.radio("Navegar:", [
         "📊 Dashboard (Visão Geral)",
         "⚖️ Conciliação (Shoppbud vs App)", # NOVO MENU
@@ -398,7 +396,7 @@ if df is not None:
         "🔄 Sincronizar (Planograma)",
         "📉 Baixar Vendas (Do Relatório)",
         "🏠 Gôndola (Loja)", 
-        # "🛒 Fornecedor (Compras)" -> REMOVIDO
+        # Menu "Fornecedor" removido conforme solicitado
         "💰 Inteligência de Compras (Histórico)", # NOME MELHORADO
         "🏡 Estoque Central (Casa)",
         "📋 Tabela Geral"
@@ -1297,12 +1295,35 @@ if df is not None:
                 st.info("Sem histórico suficiente para análises.")
             else:
                 st.markdown("### 🏆 Ranking: Onde comprar mais barato?")
-                lista_prods_hist = sorted(df_hist['produto'].astype(str).unique())
-                prod_sel_graf = st.selectbox("Selecione um Produto para analisar:", lista_prods_hist)
                 
-                if prod_sel_graf:
-                    # Filtra dados do produto
-                    df_prod = df_hist[df_hist['produto'] == prod_sel_graf].copy()
+                # --- CRIA LISTA DE PRODUTOS COM CÓDIGO (INTELIGÊNCIA) ---
+                # Garante que temos a coluna 'produto' como string
+                df_hist['produto_str'] = df_hist['produto'].astype(str)
+                
+                # Se possível, vamos tentar recuperar o código de barras do produto atual
+                # para exibir bonito no dropdown (COD - NOME)
+                # Cruzamos com o DF atual para pegar o código
+                if not df.empty:
+                    # Cria um dicionário {Nome: Código}
+                    mapa_codigos = dict(zip(df['nome do produto'], df['código de barras']))
+                    # Cria uma coluna temporária no histórico para exibição
+                    df_hist['display_combo'] = df_hist['produto_str'].map(mapa_codigos).fillna('?') + " - " + df_hist['produto_str']
+                else:
+                    df_hist['display_combo'] = df_hist['produto_str']
+
+                lista_prods_hist = sorted(df_hist['display_combo'].unique())
+                prod_sel_graf_raw = st.selectbox("Selecione um Produto para analisar:", lista_prods_hist)
+                
+                if prod_sel_graf_raw:
+                    # Extrai o nome puro de volta para filtrar no histórico
+                    # Se o formato for "COD - NOME", pegamos o NOME (parte depois do " - ")
+                    if " - " in prod_sel_graf_raw:
+                        nome_para_filtro = prod_sel_graf_raw.split(" - ", 1)[1]
+                    else:
+                        nome_para_filtro = prod_sel_graf_raw
+
+                    # Filtra dados do produto usando o nome
+                    df_prod = df_hist[df_hist['produto'] == nome_para_filtro].copy()
                     
                     # Gráfico 1: Preço Médio por Fornecedor
                     if not df_prod.empty:
@@ -1326,7 +1347,7 @@ if df is not None:
                     if df_hist_visual.empty: 
                         df_hist_visual = filtrar_dados_inteligente(df_hist, 'fornecedor', busca_hist_precos)
                 
-                # --- CRIAÇÃO DO MAPA DE CÓDIGOS PARA VISUALIZAÇÃO ---
+                # --- CRIAÇÃO DO MAPA DE CÓDIGOS PARA VISUALIZAÇÃO NA TABELA ---
                 mapa_ean = dict(zip(df['nome do produto'], df['código de barras']))
                 df_hist_visual['código_barras'] = df_hist_visual['produto'].map(mapa_ean)
                 # Reorganiza colunas
