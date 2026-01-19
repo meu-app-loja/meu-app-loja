@@ -731,11 +731,16 @@ if df is not None:
                 dados = ler_xml_nfe(arquivo_xml, df_oficial)
                 st.success(f"Nota Fiscal: **{dados['numero']}** | Fornecedor: **{dados['fornecedor']}**")
                 
-                # --- DATA MANUAL DO XML ---
+                # --- DATA MANUAL DO XML (CORREÇÃO DE HORA) ---
                 c_data, c_hora = st.columns(2)
+                # Pega a hora atual sem conversão do navegador
+                hora_padrao = obter_hora_manaus().time()
+                
                 data_xml_padrao = dados['data'].date() if dados['data'] else obter_hora_manaus().date()
                 data_escolhida = c_data.date_input("📅 Data da Compra/Entrada (Histórico):", value=data_xml_padrao)
-                hora_escolhida = c_hora.time_input("⏰ Hora:", value=obter_hora_manaus().time(), step=60)
+                # Ajuste: Apenas value=hora_padrao, sem conversões automáticas
+                hora_escolhida = c_hora.time_input("⏰ Hora:", value=hora_padrao, step=60)
+                
                 data_final_historico = datetime.combine(data_escolhida, hora_escolhida)
                 # --------------------------
 
@@ -1005,7 +1010,10 @@ if df is not None:
             
             # --- FILTRO DE DATA ---
             c_dt, c_hr = st.columns(2)
-            data_corte = c_dt.date_input("🚫 Ignorar vendas ANTES do dia:", value=obter_hora_manaus().date())
+            # Pega data atual ajustada
+            hora_padrao = obter_hora_manaus()
+            data_corte = c_dt.date_input("🚫 Ignorar vendas ANTES do dia:", value=hora_padrao.date())
+            # A hora padrão aqui já entra como "19:00" como sugestão, mas editável
             hora_corte = c_hr.time_input("⏰ E antes do horário:", value=datetime.strptime("19:00", "%H:%M").time(), step=60)
             data_hora_corte = datetime.combine(data_corte, hora_corte)
             st.warning(f"O sistema irá processar APENAS vendas feitas DEPOIS de: **{data_hora_corte.strftime('%d/%m/%Y %H:%M')}**")
@@ -1171,8 +1179,11 @@ if df is not None:
                         with st.form("form_transf_gondola"):
                             c_dt, c_hr, c_qtd = st.columns(3)
                             dt_transf = c_dt.date_input("Data da Transferência:", obter_hora_manaus().date())
-                            # --- AJUSTE: step=60 ---
-                            hr_transf = c_hr.time_input("Hora:", obter_hora_manaus().time(), step=60)
+                            # --- CORREÇÃO HORA ---
+                            # Pega hora atual limpa
+                            hora_atual = obter_hora_manaus().time()
+                            hr_transf = c_hr.time_input("Hora:", value=hora_atual, step=60)
+                            # ---------------------
                             
                             qtd_disponivel = int(df.at[idx, 'qtd_central'])
                             qtd_transf = c_qtd.number_input(f"Quantidade (Disp: {qtd_disponivel}):", min_value=0, max_value=qtd_disponivel, value=0)
@@ -1234,7 +1245,9 @@ if df is not None:
                     st.write(f"📝 Detalhes da Compra de: **{item}**")
                     c_dt, c_hr = st.columns(2)
                     dt_compra = c_dt.date_input("Data da Compra:", obter_hora_manaus().date())
-                    hr_compra = c_hr.time_input("Hora da Compra:", obter_hora_manaus().time())
+                    # --- CORREÇÃO HORA ---
+                    hr_compra = c_hr.time_input("Hora da Compra:", value=obter_hora_manaus().time(), step=60)
+                    # ---------------------
                     forn_compra = st.text_input("Fornecedor desta compra:", value=df.at[idx, 'ultimo_fornecedor'])
                     c1, c2, c3 = st.columns(3)
                     qtd = c1.number_input("Qtd Chegada:", value=int(df.at[idx, 'qtd_comprada']))
@@ -1246,7 +1259,7 @@ if df is not None:
                         df.at[idx, 'preco_venda'] = venda
                         df.at[idx, 'status_compra'] = 'OK'
                         df.at[idx, 'qtd_comprada'] = 0
-                        df.at[idx, 'ultimo_fornecedor'] = forn_compra 
+                        df.at[idx, 'ultimo_fornecedor'] = forn_compra 
                         salvar_estoque(df, prefixo)
                         atualizar_casa_global(item, df.at[idx, 'qtd_central'], custo, venda, None, prefixo)
                         dt_full = datetime.combine(dt_compra, hr_compra)
@@ -1265,7 +1278,7 @@ if df is not None:
             df_hist_visual = df_hist
             if busca_hist_precos:
                 df_hist_visual = filtrar_dados_inteligente(df_hist, 'produto', busca_hist_precos)
-                if df_hist_visual.empty: 
+                if df_hist_visual.empty: 
                     df_hist_visual = filtrar_dados_inteligente(df_hist, 'fornecedor', busca_hist_precos)
             
             # --- CRIAÇÃO DO MAPA DE CÓDIGOS PARA VISUALIZAÇÃO ---
@@ -1279,10 +1292,10 @@ if df is not None:
 
             st.info("✅ Você pode editar ou **excluir** linhas (selecione a linha e aperte Delete).")
             df_editado = st.data_editor(
-                df_hist_visual.sort_values(by='data', ascending=False), 
-                use_container_width=True, 
+                df_hist_visual.sort_values(by='data', ascending=False), 
+                use_container_width=True, 
                 key="editor_historico_geral",
-                num_rows="dynamic", 
+                num_rows="dynamic", 
                 column_config={
                     "código_barras": st.column_config.TextColumn("Cód. Barras", disabled=True),
                     "preco_sem_desconto": st.column_config.NumberColumn("Preço Tabela", format="R$ %.2f"),
@@ -1392,7 +1405,9 @@ if df is not None:
                             st.markdown(f"### Detalhes do Registro")
                             c_dt, c_hr = st.columns(2)
                             dt_reg = c_dt.date_input("Data da Entrada/Edição:", obter_hora_manaus().date())
-                            hr_reg = c_hr.time_input("Hora:", obter_hora_manaus().time(), step=60) # STEP 60
+                            # --- CORREÇÃO HORA ---
+                            hr_reg = c_hr.time_input("Hora:", value=obter_hora_manaus().time(), step=60)
+                            # ---------------------
                             
                             c_forn = st.text_input("Fornecedor desta entrada:", value=forn_atual)
                             st.markdown("---")
