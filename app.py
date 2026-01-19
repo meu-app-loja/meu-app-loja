@@ -215,7 +215,7 @@ def inicializar_arquivos(prefixo):
         f"{prefixo}_historico_compras.xlsx": ['data', 'produto', 'fornecedor', 'qtd', 'preco_pago', 'total_gasto', 'numero_nota', 'desconto_total_money', 'preco_sem_desconto', 'obs_importacao'],
         f"{prefixo}_movimentacoes.xlsx": ['data_hora', 'produto', 'qtd_movida'],
         f"{prefixo}_vendas.xlsx": ['data_hora', 'produto', 'qtd_vendida', 'estoque_restante'],
-        f"{prefixo}_lista_compras.xlsx": ['produto', 'código_barras', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status'], # Adicionado código de barras
+        f"{prefixo}_lista_compras.xlsx": ['produto', 'código_barras', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status'],
         f"{prefixo}_log_auditoria.xlsx": ['data_hora', 'produto', 'qtd_antes', 'qtd_nova', 'acao', 'motivo']
     }
     for arquivo, colunas in arquivos.items():
@@ -269,8 +269,9 @@ def carregar_vendas(prefixo_arquivo):
 def carregar_lista_compras(prefixo_arquivo):
     try:
         df = pd.read_excel(f"{prefixo_arquivo}_lista_compras.xlsx")
-        # Garante coluna de código de barras se não existir
-        if 'código_barras' not in df.columns: df['código_barras'] = ""
+        # Garante que a coluna código de barras exista
+        if 'código_barras' not in df.columns:
+            df['código_barras'] = ""
         return df
     except: return pd.DataFrame()
 
@@ -385,6 +386,7 @@ ids_processados = carregar_ids_processados(prefixo) # Carrega IDs já baixados
 
 if df is not None:
     st.sidebar.title("🏪 Menu")
+    # MENU ATUALIZADO: REMOVIDO "FORNECEDOR"
     modo = st.sidebar.radio("Navegar:", [
         "📊 Dashboard (Visão Geral)",
         "⚖️ Conciliação (Shoppbud vs App)", # NOVO MENU
@@ -396,8 +398,8 @@ if df is not None:
         "🔄 Sincronizar (Planograma)",
         "📉 Baixar Vendas (Do Relatório)",
         "🏠 Gôndola (Loja)", 
-        "🛒 Fornecedor (Compras)", 
-        "💰 Histórico & Preços",
+        # "🛒 Fornecedor (Compras)" -> REMOVIDO
+        "💰 Inteligência de Compras (Histórico)", # NOME MELHORADO
         "🏡 Estoque Central (Casa)",
         "📋 Tabela Geral"
     ])
@@ -613,7 +615,8 @@ if df is not None:
             if not df_lista_compras.empty:
                 st.info("💡 Esta é sua lista de compras. Quando for ao mercado, use esta tabela.")
                 if usar_modo_mobile:
-                    # --- MODO CELULAR COM VISUALIZAÇÃO DE ESTOQUE ---
+                    # --- MODO CELULAR COM VISUALIZAÇÃO DE ESTOQUE (RAIO-X) ---
+                    st.markdown("### 🛒 Itens da Lista (Clique para ver Estoque)")
                     for idx, row in df_lista_compras.iterrows():
                         # Busca informações de estoque em tempo real
                         dados_estoque = df[df['nome do produto'] == row['produto']]
@@ -689,20 +692,27 @@ if df is not None:
                 obs_man = c_forn.text_input("Fornecedor/Obs (Opcional):", placeholder="Ex: Atacadão")
                 
                 c_dt, c_hr = st.columns(2)
+                # Correção do Relógio: Pega a hora limpa e permite edição
+                hora_padrao_lista = obter_hora_manaus().time().replace(second=0, microsecond=0)
                 dt_manual = c_dt.date_input("Data:", value=obter_hora_manaus().date())
-                hr_manual = c_hr.time_input("Hora:", value=obter_hora_manaus().time().replace(second=0, microsecond=0), step=60)
+                hr_manual = c_hr.time_input("Hora:", value=hora_padrao_lista, step=60)
                 
                 if st.form_submit_button("Adicionar à Lista"):
                     if prod_man_visual:
                         # Extrai código e nome
-                        parts = prod_man_visual.split(' - ', 1)
-                        cod_barras_add = parts[0]
-                        nome_prod_add = parts[1]
+                        try:
+                            parts = prod_man_visual.split(' - ', 1)
+                            cod_barras_add = parts[0]
+                            nome_prod_add = parts[1]
+                        except:
+                            cod_barras_add = ""
+                            nome_prod_add = prod_man_visual
                         
                         preco_ref = 0.0
                         mask = df['nome do produto'] == nome_prod_add
                         if mask.any(): preco_ref = df.loc[mask, 'preco_custo'].values[0]
                         
+                        # Correção de Salvamento: Usa a hora manual escolhida
                         data_formatada = datetime.combine(dt_manual, hr_manual).strftime("%d/%m/%Y %H:%M")
                         
                         novo_item = {
@@ -1276,104 +1286,95 @@ if df is not None:
                         df_mov_show = filtrar_dados_inteligente(df_mov, 'produto', busca_gondola_hist)
                         st.dataframe(df_mov_show.sort_values(by='data_hora', ascending=False), use_container_width=True, hide_index=True)
 
-    # 6. FORNECEDOR
-    elif modo == "🛒 Fornecedor (Compras)":
-        st.title(f"🛒 Compras - {loja_atual}")
-        pen = df[df['status_compra'] == 'PENDENTE']
-        if not pen.empty:
-            st.table(pen[['nome do produto', 'qtd_comprada']])
-            item = st.selectbox("Dar entrada:", pen['nome do produto'])
-            if item:
-                idx = df[df['nome do produto'] == item].index[0]
-                with st.form("compra"):
-                    st.write(f"📝 Detalhes da Compra de: **{item}**")
-                    c_dt, c_hr = st.columns(2)
-                    dt_compra = c_dt.date_input("Data da Compra:", obter_hora_manaus().date())
-                    # --- CORREÇÃO HORA ---
-                    hr_compra = c_hr.time_input("Hora da Compra:", value=obter_hora_manaus().time().replace(second=0, microsecond=0), step=60)
-                    # ---------------------
-                    forn_compra = st.text_input("Fornecedor desta compra:", value=df.at[idx, 'ultimo_fornecedor'])
-                    c1, c2, c3 = st.columns(3)
-                    qtd = c1.number_input("Qtd Chegada:", value=int(df.at[idx, 'qtd_comprada']))
-                    custo = c2.number_input("Preço Pago (UN):", value=float(df.at[idx, 'preco_custo']), format="%.2f")
-                    venda = c3.number_input("Novo Preço Venda:", value=float(df.at[idx, 'preco_venda']), format="%.2f")
-                    if st.form_submit_button("✅ ENTRAR NO ESTOQUE"):
-                        df.at[idx, 'qtd_central'] += qtd
-                        df.at[idx, 'preco_custo'] = custo
-                        df.at[idx, 'preco_venda'] = venda
-                        df.at[idx, 'status_compra'] = 'OK'
-                        df.at[idx, 'qtd_comprada'] = 0
-                        df.at[idx, 'ultimo_fornecedor'] = forn_compra
-                        salvar_estoque(df, prefixo)
-                        atualizar_casa_global(item, df.at[idx, 'qtd_central'], custo, venda, None, prefixo)
-                        dt_full = datetime.combine(dt_compra, hr_compra)
-                        hist = {'data': dt_full, 'produto': item, 'fornecedor': forn_compra, 'qtd': qtd, 'preco_pago': custo, 'total_gasto': qtd*custo}
-                        salvar_historico(pd.concat([df_hist, pd.DataFrame([hist])], ignore_index=True), prefixo)
-                        registrar_auditoria(prefixo, item, 0, qtd, "Entrada Compra Manual")
-                        st.success("Estoque atualizado e Casa sincronizada!")
-                        st.rerun()
-        else: st.success("Sem compras pendentes.")
-
-    # 7. HISTÓRICO & PREÇOS
-    elif modo == "💰 Histórico & Preços":
-        st.title("💰 Histórico & Preços")
-        if not df_hist.empty:
-            busca_hist_precos = st.text_input("🔍 Buscar no Histórico de Compras:", placeholder="Digite o nome, fornecedor...", key="busca_hist_precos")
-            df_hist_visual = df_hist
-            if busca_hist_precos:
-                df_hist_visual = filtrar_dados_inteligente(df_hist, 'produto', busca_hist_precos)
-                if df_hist_visual.empty: 
-                    df_hist_visual = filtrar_dados_inteligente(df_hist, 'fornecedor', busca_hist_precos)
-            
-            # --- CRIAÇÃO DO MAPA DE CÓDIGOS PARA VISUALIZAÇÃO ---
-            mapa_ean = dict(zip(df['nome do produto'], df['código de barras']))
-            df_hist_visual['código_barras'] = df_hist_visual['produto'].map(mapa_ean)
-            # Reorganiza colunas
-            cols = ['data', 'código_barras', 'produto', 'fornecedor', 'qtd', 'preco_sem_desconto', 'desconto_total_money', 'preco_pago', 'total_gasto', 'obs_importacao']
-            cols = [c for c in cols if c in df_hist_visual.columns]
-            df_hist_visual = df_hist_visual[cols]
-            # ----------------------------------------------------
-
-            st.info("✅ Você pode editar ou **excluir** linhas (selecione a linha e aperte Delete).")
-            df_editado = st.data_editor(
-                df_hist_visual.sort_values(by='data', ascending=False), 
-                use_container_width=True, 
-                key="editor_historico_geral",
-                num_rows="dynamic", 
-                column_config={
-                    "código_barras": st.column_config.TextColumn("Cód. Barras", disabled=True),
-                    "preco_sem_desconto": st.column_config.NumberColumn("Preço Tabela", format="R$ %.2f"),
-                    "desconto_total_money": st.column_config.NumberColumn("Desconto TOTAL", format="R$ %.2f"),
-                    "preco_pago": st.column_config.NumberColumn("Pago (Unit)", format="R$ %.2f", disabled=True),
-                    "total_gasto": st.column_config.NumberColumn("Total Gasto", format="R$ %.2f", disabled=True),
-                }
-            )
-            if st.button("💾 Salvar Alterações e Exclusões"):
-                indices_originais = df_hist_visual.index.tolist()
-                indices_editados = df_editado.index.tolist()
-                indices_removidos = list(set(indices_originais) - set(indices_editados))
-                if indices_removidos:
-                    df_hist = df_hist.drop(indices_removidos)
-                    st.warning(f"🗑️ {len(indices_removidos)} registros excluídos permanentemente.")
+    # 7. HISTÓRICO & PREÇOS (AGORA: INTELIGÊNCIA DE COMPRAS)
+    elif modo == "💰 Inteligência de Compras (Histórico)":
+        st.title("💰 Inteligência de Compras")
+        
+        tab_graf, tab_dados = st.tabs(["📊 Análise & Gráficos", "📜 Histórico Completo (Editar)"])
+        
+        with tab_graf:
+            if df_hist.empty:
+                st.info("Sem histórico suficiente para análises.")
+            else:
+                st.markdown("### 🏆 Ranking: Onde comprar mais barato?")
+                lista_prods_hist = sorted(df_hist['produto'].astype(str).unique())
+                prod_sel_graf = st.selectbox("Selecione um Produto para analisar:", lista_prods_hist)
                 
-                if 'código_barras' in df_editado.columns:
-                    df_editado = df_editado.drop(columns=['código_barras'])
+                if prod_sel_graf:
+                    # Filtra dados do produto
+                    df_prod = df_hist[df_hist['produto'] == prod_sel_graf].copy()
+                    
+                    # Gráfico 1: Preço Médio por Fornecedor
+                    if not df_prod.empty:
+                        df_ranking = df_prod.groupby('fornecedor')['preco_pago'].mean().sort_values()
+                        st.bar_chart(df_ranking)
+                        st.caption("Preço Médio pago por Fornecedor (Menor é melhor)")
+                        
+                        st.divider()
+                        
+                        # Gráfico 2: Evolução no Tempo
+                        st.markdown("### 📈 Evolução do Preço no Tempo")
+                        df_evolucao = df_prod.sort_values(by='data')
+                        st.line_chart(df_evolucao, x='data', y='preco_pago')
+        
+        with tab_dados:
+            if not df_hist.empty:
+                busca_hist_precos = st.text_input("🔍 Buscar no Histórico:", placeholder="Digite o nome, fornecedor...", key="busca_hist_precos")
+                df_hist_visual = df_hist.copy()
+                if busca_hist_precos:
+                    df_hist_visual = filtrar_dados_inteligente(df_hist, 'produto', busca_hist_precos)
+                    if df_hist_visual.empty: 
+                        df_hist_visual = filtrar_dados_inteligente(df_hist, 'fornecedor', busca_hist_precos)
                 
-                df_hist.update(df_editado)
-                for idx, row in df_hist.iterrows():
-                    try:
-                        q = float(row.get('qtd', 0))
-                        p_tab = float(row.get('preco_sem_desconto', 0))
-                        d_tot = float(row.get('desconto_total_money', 0))
-                        if q > 0 and p_tab > 0:
-                            total_liq = (p_tab * q) - d_tot
-                            df_hist.at[idx, 'preco_pago'] = total_liq / q
-                            df_hist.at[idx, 'total_gasto'] = total_liq
-                    except: pass
-                salvar_historico(df_hist, prefixo)
-                st.success("Histórico salvo e sincronizado!")
-                st.rerun()
-        else: st.info("Sem histórico de compras.")
+                # --- CRIAÇÃO DO MAPA DE CÓDIGOS PARA VISUALIZAÇÃO ---
+                mapa_ean = dict(zip(df['nome do produto'], df['código de barras']))
+                df_hist_visual['código_barras'] = df_hist_visual['produto'].map(mapa_ean)
+                # Reorganiza colunas
+                cols = ['data', 'código_barras', 'produto', 'fornecedor', 'qtd', 'preco_sem_desconto', 'desconto_total_money', 'preco_pago', 'total_gasto', 'obs_importacao']
+                cols = [c for c in cols if c in df_hist_visual.columns]
+                df_hist_visual = df_hist_visual[cols]
+                # ----------------------------------------------------
+
+                st.info("✅ Você pode editar ou **excluir** linhas (selecione a linha e aperte Delete no teclado).")
+                df_editado = st.data_editor(
+                    df_hist_visual.sort_values(by='data', ascending=False), 
+                    use_container_width=True, 
+                    key="editor_historico_geral",
+                    num_rows="dynamic", 
+                    column_config={
+                        "código_barras": st.column_config.TextColumn("Cód. Barras", disabled=True),
+                        "preco_sem_desconto": st.column_config.NumberColumn("Preço Tabela", format="R$ %.2f"),
+                        "desconto_total_money": st.column_config.NumberColumn("Desconto TOTAL", format="R$ %.2f"),
+                        "preco_pago": st.column_config.NumberColumn("Pago (Unit)", format="R$ %.2f", disabled=True),
+                        "total_gasto": st.column_config.NumberColumn("Total Gasto", format="R$ %.2f", disabled=True),
+                    }
+                )
+                if st.button("💾 Salvar Alterações e Exclusões"):
+                    indices_originais = df_hist_visual.index.tolist()
+                    indices_editados = df_editado.index.tolist()
+                    indices_removidos = list(set(indices_originais) - set(indices_editados))
+                    if indices_removidos:
+                        df_hist = df_hist.drop(indices_removidos)
+                        st.warning(f"🗑️ {len(indices_removidos)} registros excluídos permanentemente.")
+                    
+                    if 'código_barras' in df_editado.columns:
+                        df_editado = df_editado.drop(columns=['código_barras'])
+                    
+                    df_hist.update(df_editado)
+                    for idx, row in df_hist.iterrows():
+                        try:
+                            q = float(row.get('qtd', 0))
+                            p_tab = float(row.get('preco_sem_desconto', 0))
+                            d_tot = float(row.get('desconto_total_money', 0))
+                            if q > 0 and p_tab > 0:
+                                total_liq = (p_tab * q) - d_tot
+                                df_hist.at[idx, 'preco_pago'] = total_liq / q
+                                df_hist.at[idx, 'total_gasto'] = total_liq
+                        except: pass
+                    salvar_historico(df_hist, prefixo)
+                    st.success("Histórico salvo e sincronizado!")
+                    st.rerun()
+            else: st.info("Sem histórico de compras.")
 
     # 8. ESTOQUE CENTRAL
     elif modo == "🏡 Estoque Central (Casa)":
@@ -1449,7 +1450,9 @@ if df is not None:
                             st.markdown(f"### Detalhes do Registro")
                             c_dt, c_hr = st.columns(2)
                             dt_reg = c_dt.date_input("Data da Entrada/Edição:", obter_hora_manaus().date())
+                            # --- CORREÇÃO HORA ---
                             hr_reg = c_hr.time_input("Hora:", value=obter_hora_manaus().time().replace(second=0, microsecond=0), step=60) # STEP 60
+                            # ---------------------
                             
                             c_forn = st.text_input("Fornecedor desta entrada:", value=forn_atual)
                             st.markdown("---")
