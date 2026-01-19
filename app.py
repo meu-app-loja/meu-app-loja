@@ -215,7 +215,7 @@ def inicializar_arquivos(prefixo):
         f"{prefixo}_historico_compras.xlsx": ['data', 'produto', 'fornecedor', 'qtd', 'preco_pago', 'total_gasto', 'numero_nota', 'desconto_total_money', 'preco_sem_desconto', 'obs_importacao'],
         f"{prefixo}_movimentacoes.xlsx": ['data_hora', 'produto', 'qtd_movida'],
         f"{prefixo}_vendas.xlsx": ['data_hora', 'produto', 'qtd_vendida', 'estoque_restante'],
-        f"{prefixo}_lista_compras.xlsx": ['produto', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status'],
+        f"{prefixo}_lista_compras.xlsx": ['produto', 'código_barras', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status'], # Adicionado código de barras
         f"{prefixo}_log_auditoria.xlsx": ['data_hora', 'produto', 'qtd_antes', 'qtd_nova', 'acao', 'motivo']
     }
     for arquivo, colunas in arquivos.items():
@@ -267,7 +267,11 @@ def carregar_vendas(prefixo_arquivo):
     except: return pd.DataFrame()
 
 def carregar_lista_compras(prefixo_arquivo):
-    try: return pd.read_excel(f"{prefixo_arquivo}_lista_compras.xlsx")
+    try:
+        df = pd.read_excel(f"{prefixo_arquivo}_lista_compras.xlsx")
+        # Garante coluna de código de barras se não existir
+        if 'código_barras' not in df.columns: df['código_barras'] = ""
+        return df
     except: return pd.DataFrame()
 
 # --- XML ---
@@ -609,17 +613,31 @@ if df is not None:
             if not df_lista_compras.empty:
                 st.info("💡 Esta é sua lista de compras. Quando for ao mercado, use esta tabela.")
                 if usar_modo_mobile:
+                    # --- MODO CELULAR COM VISUALIZAÇÃO DE ESTOQUE ---
                     for idx, row in df_lista_compras.iterrows():
-                        with st.container(border=True):
-                            st.write(f"**{row['produto']}**")
+                        # Busca informações de estoque em tempo real
+                        dados_estoque = df[df['nome do produto'] == row['produto']]
+                        qtd_loja_atual = 0
+                        qtd_casa_atual = 0
+                        if not dados_estoque.empty:
+                            qtd_loja_atual = int(dados_estoque.iloc[0]['qtd.estoque'])
+                            qtd_casa_atual = int(dados_estoque.iloc[0]['qtd_central'])
+                        
+                        # Cria o expander clicável
+                        with st.expander(f"🛒 {row['código_barras']} - {row['produto']}"):
                             c1, c2 = st.columns(2)
-                            c1.caption(f"Qtd: {int(row['qtd_sugerida'])}")
-                            c2.caption(f"Status: {row['status']}")
+                            c1.metric("Estoque Loja", qtd_loja_atual)
+                            c2.metric("Estoque Casa", qtd_casa_atual)
+                            st.divider()
+                            st.write(f"**Qtd Sugerida:** {int(row['qtd_sugerida'])}")
+                            st.caption(f"Incluído em: {row['data_inclusao']}")
+                            st.caption(f"Status: {row['status']}")
                 else:
                     st.dataframe(df_lista_compras, use_container_width=True)
+                
                 c_del, c_pdf = st.columns(2)
                 if c_del.button("🗑️ Limpar Lista Inteira (Após Comprar)"):
-                    df_lista_compras = pd.DataFrame(columns=['produto', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status'])
+                    df_lista_compras = pd.DataFrame(columns=['produto', 'código_barras', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status'])
                     salvar_lista_compras(df_lista_compras, prefixo)
                     st.success("Lista limpa!")
                     st.rerun()
@@ -644,10 +662,11 @@ if df is not None:
                             if not ja_na_lista:
                                 novos_itens.append({
                                     'produto': row['nome do produto'],
+                                    'código_barras': row['código de barras'],
                                     'qtd_sugerida': row['qtd_minima'] * 3,
                                     'fornecedor': row['ultimo_fornecedor'],
                                     'custo_previsto': row['preco_custo'],
-                                    'data_inclusao': obter_hora_manaus().strftime("%d/%m/%Y"),
+                                    'data_inclusao': obter_hora_manaus().strftime("%d/%m/%Y %H:%M"),
                                     'status': 'A Comprar'
                                 })
                         if novos_itens:
@@ -660,16 +679,41 @@ if df is not None:
             st.divider()
             st.subheader("✋ Adicionar Manualmente")
             with st.form("add_manual_lista"):
-                lista_prods = [""] + sorted(df['nome do produto'].astype(str).unique().tolist())
-                prod_man = st.selectbox("Produto:", lista_prods)
-                qtd_man = st.number_input("Qtd a Comprar:", min_value=1, value=10)
-                obs_man = st.text_input("Fornecedor/Obs:", placeholder="Ex: Atacadão")
+                # Lista com código para facilitar busca
+                lista_visuais = (df['código de barras'].astype(str) + " - " + df['nome do produto'].astype(str)).unique().tolist()
+                lista_visuais = sorted(lista_visuais)
+                prod_man_visual = st.selectbox("Produto:", [""] + lista_visuais)
+                
+                c_qtd, c_forn = st.columns(2)
+                qtd_man = c_qtd.number_input("Qtd a Comprar:", min_value=1, value=10)
+                obs_man = c_forn.text_input("Fornecedor/Obs (Opcional):", placeholder="Ex: Atacadão")
+                
+                c_dt, c_hr = st.columns(2)
+                dt_manual = c_dt.date_input("Data:", value=obter_hora_manaus().date())
+                hr_manual = c_hr.time_input("Hora:", value=obter_hora_manaus().time().replace(second=0, microsecond=0), step=60)
+                
                 if st.form_submit_button("Adicionar à Lista"):
-                    if prod_man:
+                    if prod_man_visual:
+                        # Extrai código e nome
+                        parts = prod_man_visual.split(' - ', 1)
+                        cod_barras_add = parts[0]
+                        nome_prod_add = parts[1]
+                        
                         preco_ref = 0.0
-                        mask = df['nome do produto'] == prod_man
+                        mask = df['nome do produto'] == nome_prod_add
                         if mask.any(): preco_ref = df.loc[mask, 'preco_custo'].values[0]
-                        novo_item = {'produto': prod_man, 'qtd_sugerida': qtd_man, 'fornecedor': obs_man, 'custo_previsto': preco_ref, 'data_inclusao': obter_hora_manaus().strftime("%d/%m/%Y"), 'status': 'Manual'}
+                        
+                        data_formatada = datetime.combine(dt_manual, hr_manual).strftime("%d/%m/%Y %H:%M")
+                        
+                        novo_item = {
+                            'produto': nome_prod_add, 
+                            'código_barras': cod_barras_add,
+                            'qtd_sugerida': qtd_man, 
+                            'fornecedor': obs_man, 
+                            'custo_previsto': preco_ref, 
+                            'data_inclusao': data_formatada, 
+                            'status': 'Manual'
+                        }
                         df_lista_compras = pd.concat([df_lista_compras, pd.DataFrame([novo_item])], ignore_index=True)
                         salvar_lista_compras(df_lista_compras, prefixo)
                         st.success("Adicionado!")
@@ -734,11 +778,11 @@ if df is not None:
                 # --- DATA MANUAL DO XML (CORREÇÃO DE HORA) ---
                 c_data, c_hora = st.columns(2)
                 # Pega a hora atual sem conversão do navegador
-                hora_padrao = obter_hora_manaus().time()
+                hora_padrao = obter_hora_manaus().time().replace(second=0, microsecond=0)
                 
                 data_xml_padrao = dados['data'].date() if dados['data'] else obter_hora_manaus().date()
                 data_escolhida = c_data.date_input("📅 Data da Compra/Entrada (Histórico):", value=data_xml_padrao)
-                # Ajuste: Apenas value=hora_padrao, sem conversões automáticas e step=60
+                # Ajuste: Apenas value=hora_padrao, sem conversões automáticas
                 hora_escolhida = c_hora.time_input("⏰ Hora:", value=hora_padrao, step=60)
                 
                 data_final_historico = datetime.combine(data_escolhida, hora_escolhida)
@@ -1181,7 +1225,7 @@ if df is not None:
                             dt_transf = c_dt.date_input("Data da Transferência:", obter_hora_manaus().date())
                             # --- CORREÇÃO HORA ---
                             # Pega hora atual limpa
-                            hora_atual = obter_hora_manaus().time()
+                            hora_atual = obter_hora_manaus().time().replace(second=0, microsecond=0)
                             hr_transf = c_hr.time_input("Hora:", value=hora_atual, step=60)
                             # ---------------------
                             
@@ -1246,7 +1290,7 @@ if df is not None:
                     c_dt, c_hr = st.columns(2)
                     dt_compra = c_dt.date_input("Data da Compra:", obter_hora_manaus().date())
                     # --- CORREÇÃO HORA ---
-                    hr_compra = c_hr.time_input("Hora da Compra:", value=obter_hora_manaus().time(), step=60)
+                    hr_compra = c_hr.time_input("Hora da Compra:", value=obter_hora_manaus().time().replace(second=0, microsecond=0), step=60)
                     # ---------------------
                     forn_compra = st.text_input("Fornecedor desta compra:", value=df.at[idx, 'ultimo_fornecedor'])
                     c1, c2, c3 = st.columns(3)
@@ -1405,7 +1449,7 @@ if df is not None:
                             st.markdown(f"### Detalhes do Registro")
                             c_dt, c_hr = st.columns(2)
                             dt_reg = c_dt.date_input("Data da Entrada/Edição:", obter_hora_manaus().date())
-                            hr_reg = c_hr.time_input("Hora:", value=obter_hora_manaus().time(), step=60) # STEP 60
+                            hr_reg = c_hr.time_input("Hora:", value=obter_hora_manaus().time().replace(second=0, microsecond=0), step=60) # STEP 60
                             
                             c_forn = st.text_input("Fornecedor desta entrada:", value=forn_atual)
                             st.markdown("---")
