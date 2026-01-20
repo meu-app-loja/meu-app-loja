@@ -5,6 +5,7 @@ import os
 import xml.etree.ElementTree as ET
 import unicodedata
 from io import BytesIO
+import zipfile # Adicionado para o Backup
 
 # Configuração da página
 st.set_page_config(page_title="Gestão Multi-Lojas", layout="wide", page_icon="🏪")
@@ -129,6 +130,29 @@ st.sidebar.markdown("---")
 if loja_atual == "Loja 1 (Principal)": prefixo = "loja1"
 elif loja_atual == "Loja 2 (Filial)": prefixo = "loja2"
 else: prefixo = "loja3"
+
+# --- FUNÇÃO DE BACKUP (NOVA) ---
+def gerar_backup_zip():
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        # Lista todos os arquivos xlsx e csv do diretório atual
+        for root, dirs, files in os.walk("."):
+            for file in files:
+                if file.endswith(".xlsx") or file.endswith(".csv"):
+                    zip_file.write(os.path.join(root, file), file)
+    buffer.seek(0)
+    return buffer
+
+st.sidebar.markdown("### 🛡️ Segurança")
+if st.sidebar.button("💾 Baixar Backup Completo"):
+    zip_buffer = gerar_backup_zip()
+    st.sidebar.download_button(
+        label="⬇️ Clique para Salvar Backup",
+        data=zip_buffer,
+        file_name=f"backup_sistema_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+        mime="application/zip"
+    )
+st.sidebar.markdown("---")
 
 # --- FUNÇÕES AUXILIARES ---
 def formatar_moeda_br(valor):
@@ -559,23 +583,34 @@ if df is not None:
     # 1.5 MÓDULO: TRANSFERÊNCIA VIA PICKLIST
     elif modo == "🚚 Transferência em Massa (Picklist)":
         st.title(f"🚚 Transferência em Massa - {loja_atual}")
-        st.markdown("**Sistema Shoppbud/Transferência:** Suba o Excel para mover estoque da Casa para a Loja.")
+        st.markdown("**Sistema Shoppbud/Transferência:** Suba os arquivos Excel para mover estoque da Casa para a Loja.")
         
         # MODO MANUAL DE SELEÇÃO DE COLUNAS (PARA EVITAR ERRO DE NOME)
-        arquivo_pick = st.file_uploader("📂 Subir Picklist (.xlsx)", type=['xlsx', 'xls'])
+        # ATUALIZAÇÃO: AGORA ACEITA MÚLTIPLOS ARQUIVOS
+        arquivos_pick = st.file_uploader("📂 Subir Picklist (.xlsx)", type=['xlsx', 'xls'], accept_multiple_files=True)
         
-        if arquivo_pick:
+        if arquivos_pick:
             try:
-                # 1. Lê apenas o cabeçalho para mostrar e configurar
-                df_temp_raw = pd.read_excel(arquivo_pick, header=None)
-                st.info("Visualização das primeiras linhas do arquivo:")
+                # 1. Combina todos os arquivos em um único DataFrame
+                lista_dfs = []
+                st.info(f"📂 {len(arquivos_pick)} arquivos carregados. O sistema irá juntá-los automaticamente.")
+                
+                # Lê o cabeçalho do primeiro arquivo para configurar
+                primeiro_arquivo = arquivos_pick[0]
+                df_temp_raw = pd.read_excel(primeiro_arquivo, header=None)
+                st.info("Visualização das primeiras linhas (para conferência das colunas):")
                 st.dataframe(df_temp_raw.head(5))
                 
                 linha_cabecalho = st.number_input("Em qual linha estão os títulos (cabeçalho)?", min_value=0, value=0)
                 
-                # 2. Recarrega com o cabeçalho certo
-                arquivo_pick.seek(0)
-                df_pick = pd.read_excel(arquivo_pick, header=linha_cabecalho)
+                # Processa todos os arquivos
+                for arq in arquivos_pick:
+                    arq.seek(0)
+                    df_temp = pd.read_excel(arq, header=linha_cabecalho)
+                    lista_dfs.append(df_temp)
+                
+                # Cria o DataFrame unificado
+                df_pick = pd.concat(lista_dfs, ignore_index=True)
                 cols = df_pick.columns.tolist()
                 
                 st.markdown("---")
@@ -584,41 +619,57 @@ if df is not None:
                 col_barras = c1.selectbox("Selecione a coluna de CÓDIGO DE BARRAS:", cols)
                 col_qtd = c2.selectbox("Selecione a coluna de QUANTIDADE A TRANSFERIR:", cols)
                 
-                if st.button("🚀 PROCESSAR TRANSFERÊNCIA"):
+                if st.button("🚀 PROCESSAR TRANSFERÊNCIA EM LOTE"):
                     movidos = 0
                     erros = 0
                     bar = st.progress(0)
                     log_movs = []
                     total_linhas = len(df_pick)
                     
+                    nao_encontrados = []
+
                     for i, row in df_pick.iterrows():
+                        # LIMPEZA RIGOROSA DO CÓDIGO DA PICKLIST
                         cod_pick = str(row[col_barras]).replace('.0', '').strip()
                         qtd_pick = pd.to_numeric(row[col_qtd], errors='coerce')
                         
                         if qtd_pick > 0:
+                            # Busca exata
                             mask = df['código de barras'] == cod_pick
+                            
                             if mask.any():
                                 idx = df[mask].index[0]
                                 nome_prod = df.at[idx, 'nome do produto']
                                 qtd_antiga_loja = df.at[idx, 'qtd.estoque']
+                                
+                                # APLICA A TRANSFERÊNCIA NO DATAFRAME PRINCIPAL
                                 df.at[idx, 'qtd_central'] -= qtd_pick
                                 df.at[idx, 'qtd.estoque'] += qtd_pick
                                 
                                 log_movs.append({'data_hora': obter_hora_manaus(), 'produto': nome_prod, 'qtd_movida': qtd_pick})
+                                
+                                # SINCRONIZA ESTOQUE CASA GLOBAL (IMPORTANTE!)
                                 atualizar_casa_global(nome_prod, df.at[idx, 'qtd_central'], None, None, None, prefixo)
+                                
                                 # Log Auditoria
                                 registrar_auditoria(prefixo, nome_prod, qtd_antiga_loja, df.at[idx, 'qtd.estoque'], "Transferência Picklist")
                                 movidos += 1
                             else:
                                 erros += 1
+                                nao_encontrados.append(f"{cod_pick}")
                         bar.progress((i+1)/total_linhas)
                     
+                    # SALVA O ESTOQUE ATUALIZADO (CRUCIAL!)
                     salvar_estoque(df, prefixo)
+                    
                     if log_movs:
                         df_mov = pd.concat([df_mov, pd.DataFrame(log_movs)], ignore_index=True)
                         salvar_movimentacoes(df_mov, prefixo)
+                    
                     st.success(f"✅ {movidos} produtos transferidos com sucesso!")
-                    if erros > 0: st.warning(f"⚠️ {erros} produtos não encontrados no cadastro.")
+                    if erros > 0: 
+                        st.warning(f"⚠️ {erros} produtos não encontrados ou com código diferente no sistema.")
+                        st.write("Códigos não encontrados:", nao_encontrados)
             except Exception as e: st.error(f"Erro ao ler arquivo: {e}")
 
     # 1.6 MÓDULO: LISTA DE COMPRAS
