@@ -1634,3 +1634,4 @@ if df is not None:
                     st.success(f"✅ Mágica feita! {qtd_antes - qtd_depois} produtos duplicados foram unidos e os nomes corrigidos.")
                     st.balloons()
                     st.rerun()
+
