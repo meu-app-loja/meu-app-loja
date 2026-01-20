@@ -385,6 +385,7 @@ ids_processados = carregar_ids_processados(prefixo) # Carrega IDs já baixados
 
 if df is not None:
     st.sidebar.title("🏪 Menu")
+    # MENU ATUALIZADO: REMOVIDO "FORNECEDOR"
     modo = st.sidebar.radio("Navegar:", [
         "📊 Dashboard (Visão Geral)",
         "⚖️ Conciliação (Shoppbud vs App)", # NOVO MENU
@@ -690,8 +691,13 @@ if df is not None:
                 obs_man = c_forn.text_input("Fornecedor/Obs (Opcional):", placeholder="Ex: Atacadão")
                 
                 c_dt, c_hr = st.columns(2)
-                # Correção do Relógio: Pega a hora limpa e permite edição
-                hora_padrao_lista = obter_hora_manaus().time().replace(second=0, microsecond=0)
+                
+                # CORREÇÃO DEFINITIVA DO RELÓGIO (TRAVA DE MEMÓRIA PARA LISTA DE COMPRAS)
+                if 'hora_lista_fixa' not in st.session_state:
+                    st.session_state['hora_lista_fixa'] = obter_hora_manaus().time().replace(second=0, microsecond=0)
+                
+                hora_padrao_lista = st.session_state['hora_lista_fixa']
+                
                 dt_manual = c_dt.date_input("Data:", value=obter_hora_manaus().date())
                 hr_manual = c_hr.time_input("Hora:", value=hora_padrao_lista, step=60)
                 
@@ -783,15 +789,23 @@ if df is not None:
                 dados = ler_xml_nfe(arquivo_xml, df_oficial)
                 st.success(f"Nota Fiscal: **{dados['numero']}** | Fornecedor: **{dados['fornecedor']}**")
                 
-                # --- DATA MANUAL DO XML (CORREÇÃO DE HORA) ---
+                # --- DATA MANUAL DO XML (CORREÇÃO DE HORA COM TRAVA) ---
                 c_data, c_hora = st.columns(2)
-                # Pega a hora atual sem conversão do navegador
-                hora_padrao = obter_hora_manaus().time().replace(second=0, microsecond=0)
+                
+                # CORREÇÃO DEFINITIVA DO RELÓGIO (TRAVA DE MEMÓRIA)
+                # Cria uma chave única baseada no nome do arquivo para não resetar o relógio
+                chave_hora = f"hora_xml_{arquivo_xml.name}"
+                if chave_hora not in st.session_state:
+                    # Salva a hora APENAS na primeira vez que carrega o arquivo
+                    st.session_state[chave_hora] = obter_hora_manaus().time().replace(second=0, microsecond=0)
+                
+                hora_padrao_congelada = st.session_state[chave_hora]
                 
                 data_xml_padrao = dados['data'].date() if dados['data'] else obter_hora_manaus().date()
                 data_escolhida = c_data.date_input("📅 Data da Compra/Entrada (Histórico):", value=data_xml_padrao)
-                # Ajuste: Apenas value=hora_padrao, sem conversões automáticas
-                hora_escolhida = c_hora.time_input("⏰ Hora:", value=hora_padrao, step=60)
+                
+                # Ajuste: Usa a hora congelada no value
+                hora_escolhida = c_hora.time_input("⏰ Hora:", value=hora_padrao_congelada, step=60)
                 
                 data_final_historico = datetime.combine(data_escolhida, hora_escolhida)
                 # --------------------------
