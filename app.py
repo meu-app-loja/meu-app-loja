@@ -560,51 +560,66 @@ if df is not None:
     elif modo == "🚚 Transferência em Massa (Picklist)":
         st.title(f"🚚 Transferência em Massa - {loja_atual}")
         st.markdown("**Sistema Shoppbud/Transferência:** Suba o Excel para mover estoque da Casa para a Loja.")
+        
+        # MODO MANUAL DE SELEÇÃO DE COLUNAS (PARA EVITAR ERRO DE NOME)
         arquivo_pick = st.file_uploader("📂 Subir Picklist (.xlsx)", type=['xlsx', 'xls'])
         
         if arquivo_pick:
             try:
-                df_pick = pd.read_excel(arquivo_pick)
-                df_pick.columns = df_pick.columns.str.strip().str.lower()
-                col_barras = next((c for c in df_pick.columns if 'barras' in c), None)
-                col_qtd = next((c for c in df_pick.columns if 'transferir' in c), None)
+                # 1. Lê apenas o cabeçalho para mostrar e configurar
+                df_temp_raw = pd.read_excel(arquivo_pick, header=None)
+                st.info("Visualização das primeiras linhas do arquivo:")
+                st.dataframe(df_temp_raw.head(5))
                 
-                if not col_barras or not col_qtd:
-                    st.error("❌ Colunas 'Código de Barras' ou 'Transferir' não encontradas.")
-                else:
-                    if st.button("🚀 PROCESSAR TRANSFERÊNCIA"):
-                        movidos = 0
-                        erros = 0
-                        bar = st.progress(0)
-                        log_movs = []
-                        total_linhas = len(df_pick)
-                        for i, row in df_pick.iterrows():
-                            cod_pick = str(row[col_barras]).replace('.0', '').strip()
-                            qtd_pick = pd.to_numeric(row[col_qtd], errors='coerce')
-                            if qtd_pick > 0:
-                                mask = df['código de barras'] == cod_pick
-                                if mask.any():
-                                    idx = df[mask].index[0]
-                                    nome_prod = df.at[idx, 'nome do produto']
-                                    qtd_antiga_loja = df.at[idx, 'qtd.estoque']
-                                    df.at[idx, 'qtd_central'] -= qtd_pick
-                                    df.at[idx, 'qtd.estoque'] += qtd_pick
-                                    
-                                    log_movs.append({'data_hora': obter_hora_manaus(), 'produto': nome_prod, 'qtd_movida': qtd_pick})
-                                    atualizar_casa_global(nome_prod, df.at[idx, 'qtd_central'], None, None, None, prefixo)
-                                    # Log Auditoria
-                                    registrar_auditoria(prefixo, nome_prod, qtd_antiga_loja, df.at[idx, 'qtd.estoque'], "Transferência Picklist")
-                                    movidos += 1
-                                else:
-                                    erros += 1
-                            bar.progress((i+1)/total_linhas)
-                        salvar_estoque(df, prefixo)
-                        if log_movs:
-                            df_mov = pd.concat([df_mov, pd.DataFrame(log_movs)], ignore_index=True)
-                            salvar_movimentacoes(df_mov, prefixo)
-                        st.success(f"✅ {movidos} produtos transferidos!")
-                        if erros > 0: st.warning(f"⚠️ {erros} não encontrados.")
-            except Exception as e: st.error(f"Erro: {e}")
+                linha_cabecalho = st.number_input("Em qual linha estão os títulos (cabeçalho)?", min_value=0, value=0)
+                
+                # 2. Recarrega com o cabeçalho certo
+                arquivo_pick.seek(0)
+                df_pick = pd.read_excel(arquivo_pick, header=linha_cabecalho)
+                cols = df_pick.columns.tolist()
+                
+                st.markdown("---")
+                st.write("### 🛠️ Configure as Colunas")
+                c1, c2 = st.columns(2)
+                col_barras = c1.selectbox("Selecione a coluna de CÓDIGO DE BARRAS:", cols)
+                col_qtd = c2.selectbox("Selecione a coluna de QUANTIDADE A TRANSFERIR:", cols)
+                
+                if st.button("🚀 PROCESSAR TRANSFERÊNCIA"):
+                    movidos = 0
+                    erros = 0
+                    bar = st.progress(0)
+                    log_movs = []
+                    total_linhas = len(df_pick)
+                    
+                    for i, row in df_pick.iterrows():
+                        cod_pick = str(row[col_barras]).replace('.0', '').strip()
+                        qtd_pick = pd.to_numeric(row[col_qtd], errors='coerce')
+                        
+                        if qtd_pick > 0:
+                            mask = df['código de barras'] == cod_pick
+                            if mask.any():
+                                idx = df[mask].index[0]
+                                nome_prod = df.at[idx, 'nome do produto']
+                                qtd_antiga_loja = df.at[idx, 'qtd.estoque']
+                                df.at[idx, 'qtd_central'] -= qtd_pick
+                                df.at[idx, 'qtd.estoque'] += qtd_pick
+                                
+                                log_movs.append({'data_hora': obter_hora_manaus(), 'produto': nome_prod, 'qtd_movida': qtd_pick})
+                                atualizar_casa_global(nome_prod, df.at[idx, 'qtd_central'], None, None, None, prefixo)
+                                # Log Auditoria
+                                registrar_auditoria(prefixo, nome_prod, qtd_antiga_loja, df.at[idx, 'qtd.estoque'], "Transferência Picklist")
+                                movidos += 1
+                            else:
+                                erros += 1
+                        bar.progress((i+1)/total_linhas)
+                    
+                    salvar_estoque(df, prefixo)
+                    if log_movs:
+                        df_mov = pd.concat([df_mov, pd.DataFrame(log_movs)], ignore_index=True)
+                        salvar_movimentacoes(df_mov, prefixo)
+                    st.success(f"✅ {movidos} produtos transferidos com sucesso!")
+                    if erros > 0: st.warning(f"⚠️ {erros} produtos não encontrados no cadastro.")
+            except Exception as e: st.error(f"Erro ao ler arquivo: {e}")
 
     # 1.6 MÓDULO: LISTA DE COMPRAS
     elif modo == "📝 Lista de Compras (Planejamento)":
