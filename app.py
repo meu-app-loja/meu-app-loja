@@ -705,11 +705,10 @@ if df is not None:
         tab_lista, tab_add = st.tabs(["📋 Ver Lista Atual (Editável)", "➕ Adicionar Itens"])
         with tab_lista:
             if not df_lista_compras.empty:
-                # 1. Busca Inteligente
+                # --- MELHORIA 1: Busca e Tabela Editável ---
                 busca_lista = st.text_input("🔍 Buscar na Lista:", placeholder="Ex: arroz...")
                 df_lista_show = filtrar_dados_inteligente(df_lista_compras, 'produto', busca_lista)
 
-                # 2. Tabela Editável
                 st.info("💡 Edite quantidades, status ou apague itens (selecione e aperte Delete).")
                 df_edit_lista = st.data_editor(
                     df_lista_show,
@@ -723,7 +722,6 @@ if df is not None:
                     }
                 )
 
-                # 3. Botão Salvar
                 if st.button("💾 SALVAR ALTERAÇÕES DA LISTA"):
                     # Lógica para salvar mantendo a integridade mesmo com filtro
                     indices_originais = df_lista_show.index.tolist()
@@ -768,6 +766,18 @@ if df is not None:
                 lista_visuais = sorted((df['código de barras'].astype(str) + " - " + df['nome do produto'].astype(str)).unique().tolist())
                 prod_man_visual = st.selectbox("Produto:", [""] + lista_visuais)
                 
+                # --- MELHORIA 2: Mostrar estoque ao selecionar ---
+                if prod_man_visual:
+                    try:
+                        parts = prod_man_visual.split(' - ', 1)
+                        cod_sel = parts[0]
+                        mask_sel = df['código de barras'] == cod_sel
+                        if mask_sel.any():
+                            q_loja = int(df.loc[mask_sel, 'qtd.estoque'].values[0])
+                            q_casa = int(df.loc[mask_sel, 'qtd_central'].values[0])
+                            st.info(f"ℹ️ Posição Atual: 📦 Loja: {q_loja} | 🏡 Casa: {q_casa}")
+                    except: pass
+
                 c_qtd, c_forn = st.columns(2)
                 qtd_man = c_qtd.number_input("Qtd a Comprar:", min_value=1, value=10)
                 obs_man = c_forn.text_input("Fornecedor (Opcional):", placeholder="Ex: Atacadão")
@@ -993,11 +1003,18 @@ if df is not None:
                 else:
                     for idx, row in df_show.iterrows():
                         cor_borda = "grey"
-                        if row['qtd.estoque'] <= 0: cor_borda = "red"
-                        elif row['qtd.estoque'] < row['qtd_minima']: cor_borda = "orange"
+                        # --- MELHORIA 3: Semáforo Visual ---
+                        icon_status = "🟢"
+                        if row['qtd.estoque'] <= 0: 
+                            cor_borda = "red"
+                            icon_status = "🔴"
+                        elif row['qtd.estoque'] < row['qtd_minima']: 
+                            cor_borda = "orange"
+                            icon_status = "🟡"
+                        
                         with st.container(border=True):
                             # --- CORREÇÃO: ADICIONADO CÓDIGO DE BARRAS NO TÍTULO ---
-                            st.subheader(f"🆔 {row['código de barras']} | {row['nome do produto']}")
+                            st.subheader(f"{icon_status} 🆔 {row['código de barras']} | {row['nome do produto']}")
                             c1, c2 = st.columns(2)
                             c1.metric("🏪 Loja", int(row['qtd.estoque']))
                             c2.metric("🏡 Casa", int(row['qtd_central']))
