@@ -26,10 +26,17 @@ def conectar_google_sheets():
     # Abre a planilha mestra
     return client.open("Sistema_Estoque_Database")
 
+# --- CORREÇÃO DE ERRO 429: USO DE CACHE (TTL=60s) ---
+@st.cache_data(ttl=60) 
 def carregar_do_google(nome_aba):
-    """Lê uma aba específica da planilha e transforma em DataFrame."""
+    """Lê uma aba específica da planilha e transforma em DataFrame (Com Cache)."""
     try:
-        sh = conectar_google_sheets()
+        # Precisamos criar um cliente novo aqui dentro para o cache funcionar bem com threads
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], scope)
+        client = gspread.authorize(creds)
+        sh = client.open("Sistema_Estoque_Database")
+
         try:
             worksheet = sh.worksheet(nome_aba)
         except gspread.WorksheetNotFound:
@@ -45,8 +52,8 @@ def carregar_do_google(nome_aba):
         df = pd.DataFrame(dados, columns=headers)
         return df
     except Exception as e:
-        # Se der erro de conexão (ex: internet), tenta ler local ou retorna vazio
-        st.warning(f"Aviso: Não foi possível ler '{nome_aba}' da nuvem. Erro: {e}")
+        # Se der erro de conexão (ex: internet ou cota), retorna vazio para não travar
+        print(f"Aviso silencioso: Erro ao ler '{nome_aba}': {e}")
         return pd.DataFrame()
 
 def salvar_no_google(df, nome_aba):
@@ -55,7 +62,11 @@ def salvar_no_google(df, nome_aba):
         return
         
     try:
-        sh = conectar_google_sheets()
+        # Limpa o cache para que a alteração apareça imediatamente
+        st.cache_data.clear()
+        
+        client = conectar_google_sheets() # Conexão direta para salvar
+        sh = client
         try:
             worksheet = sh.worksheet(nome_aba)
         except gspread.WorksheetNotFound:
@@ -1264,7 +1275,8 @@ if df is not None:
                         if row['qtd.estoque'] <= 0: cor_borda = "red"
                         elif row['qtd.estoque'] < row['qtd_minima']: cor_borda = "orange"
                         with st.container(border=True):
-                            st.subheader(row['nome do produto'])
+                            # --- CORREÇÃO: ADICIONADO CÓDIGO DE BARRAS NO TÍTULO ---
+                            st.subheader(f"🆔 {row['código de barras']} | {row['nome do produto']}")
                             c1, c2 = st.columns(2)
                             c1.metric("🏪 Loja", int(row['qtd.estoque']))
                             c2.metric("🏡 Casa", int(row['qtd_central']))
@@ -1456,6 +1468,7 @@ if df is not None:
                     df_show = filtrar_dados_inteligente(df, 'nome do produto', busca_central)
                     for idx, row in df_show.iterrows():
                         with st.container(border=True):
+                            # --- CORREÇÃO: ADICIONADO CÓDIGO DE BARRAS NO TÍTULO ---
                             st.write(f"📝 {row['código de barras']} | **{row['nome do produto']}**")
                             col1, col2 = st.columns(2)
                             nova_qtd = col1.number_input(f"Qtd Casa:", value=int(row['qtd_central']), key=f"q_{idx}")
