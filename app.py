@@ -5,16 +5,80 @@ import os
 import xml.etree.ElementTree as ET
 import unicodedata
 from io import BytesIO
-import zipfile # Adicionado para o Backup
+import zipfile
+
+# --- BIBLIOTECAS DO GOOGLE SHEETS ---
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 # Configuração da página
 st.set_page_config(page_title="Gestão Multi-Lojas", layout="wide", page_icon="🏪")
 
 # ==============================================================================
-# 🕒 AJUSTE DE FUSO HORÁRIO (MANAUS / AMAZONAS / CUIABÁ: UTC-4)
+# ☁️ CONEXÃO COM GOOGLE SHEETS (O CORAÇÃO DA NUVEM)
+# ==============================================================================
+def conectar_google_sheets():
+    """Conecta ao Google Sheets usando as credenciais dos Secrets do Streamlit."""
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    # Lê as credenciais direto dos 'Secrets' do Streamlit (formato TOML)
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], scope)
+    client = gspread.authorize(creds)
+    # Abre a planilha mestra
+    return client.open("Sistema_Estoque_Database")
+
+def carregar_do_google(nome_aba):
+    """Lê uma aba específica da planilha e transforma em DataFrame."""
+    try:
+        sh = conectar_google_sheets()
+        try:
+            worksheet = sh.worksheet(nome_aba)
+        except gspread.WorksheetNotFound:
+            return pd.DataFrame() # Se a aba não existe, retorna vazio
+        
+        # Pega todos os dados
+        dados = worksheet.get_all_values()
+        if not dados:
+            return pd.DataFrame()
+            
+        # A primeira linha é o cabeçalho
+        headers = dados.pop(0)
+        df = pd.DataFrame(dados, columns=headers)
+        return df
+    except Exception as e:
+        # Se der erro de conexão (ex: internet), tenta ler local ou retorna vazio
+        st.warning(f"Aviso: Não foi possível ler '{nome_aba}' da nuvem. Erro: {e}")
+        return pd.DataFrame()
+
+def salvar_no_google(df, nome_aba):
+    """Salva o DataFrame em uma aba específica no Google Sheets."""
+    if df.empty:
+        return
+        
+    try:
+        sh = conectar_google_sheets()
+        try:
+            worksheet = sh.worksheet(nome_aba)
+        except gspread.WorksheetNotFound:
+            # Se a aba não existe, cria ela
+            worksheet = sh.add_worksheet(title=nome_aba, rows=1000, cols=20)
+        
+        # Prepara os dados: substitui NaN por string vazia (JSON não aceita NaN)
+        df_limpo = df.fillna("")
+        
+        # Transforma em lista de listas para o Google entender
+        dados_lista = [df_limpo.columns.tolist()] + df_limpo.astype(str).values.tolist()
+        
+        # Limpa e atualiza
+        worksheet.clear()
+        worksheet.update(dados_lista)
+        
+    except Exception as e:
+        st.error(f"ERRO CRÍTICO AO SALVAR NA NUVEM ({nome_aba}): {e}")
+
+# ==============================================================================
+# 🕒 AJUSTE DE FUSO HORÁRIO
 # ==============================================================================
 def obter_hora_manaus():
-    """Retorna a data e hora atual ajustada para o fuso de Manaus (-4h em relação ao UTC)."""
     return datetime.utcnow() - timedelta(hours=4)
 
 # ==============================================================================
@@ -106,16 +170,17 @@ def processar_excel_oficial(arquivo_subido):
         df_limpo.columns = ['nome do produto', 'código de barras']
         df_limpo['nome do produto'] = df_limpo['nome do produto'].apply(normalizar_texto)
         df_limpo['código de barras'] = df_limpo['código de barras'].astype(str).str.replace('.0', '', regex=False).str.strip()
-        df_limpo.to_excel("meus_produtos_oficiais.xlsx", index=False)
+        
+        # SALVA NO GOOGLE EM VEZ DE LOCAL
+        salvar_no_google(df_limpo, "meus_produtos_oficiais")
         return True
     except Exception as e:
         st.error(f"Erro ao organizar o arquivo: {e}")
         return False
 
 def carregar_base_oficial():
-    if os.path.exists("meus_produtos_oficiais.xlsx"):
-        return pd.read_excel("meus_produtos_oficiais.xlsx")
-    return pd.DataFrame()
+    # LÊ DO GOOGLE
+    return carregar_do_google("meus_produtos_oficiais")
 
 # ==============================================================================
 # 🏢 CONFIGURAÇÃO E CARREGAMENTO
@@ -131,25 +196,40 @@ if loja_atual == "Loja 1 (Principal)": prefixo = "loja1"
 elif loja_atual == "Loja 2 (Filial)": prefixo = "loja2"
 else: prefixo = "loja3"
 
-# --- FUNÇÃO DE BACKUP (NOVA) ---
-def gerar_backup_zip():
+# --- FUNÇÃO DE BACKUP (ADAPTADA PARA BAIXAR DO GOOGLE EM ZIP) ---
+def gerar_backup_zip_nuvem():
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        # Lista todos os arquivos xlsx e csv do diretório atual
-        for root, dirs, files in os.walk("."):
-            for file in files:
-                if file.endswith(".xlsx") or file.endswith(".csv"):
-                    zip_file.write(os.path.join(root, file), file)
+        # Lista de todas as tabelas possíveis para salvar no backup
+        tabelas = [
+            f"{prefixo}_estoque",
+            f"{prefixo}_historico_compras",
+            f"{prefixo}_movimentacoes",
+            f"{prefixo}_vendas",
+            f"{prefixo}_lista_compras",
+            f"{prefixo}_log_auditoria",
+            f"{prefixo}_ids_vendas",
+            "meus_produtos_oficiais"
+        ]
+        
+        for tab in tabelas:
+            df_temp = carregar_do_google(tab)
+            if not df_temp.empty:
+                # Salva como CSV dentro do ZIP
+                data = df_temp.to_csv(index=False).encode('utf-8')
+                zip_file.writestr(f"{tab}.csv", data)
+                
     buffer.seek(0)
     return buffer
 
-st.sidebar.markdown("### 🛡️ Segurança")
-if st.sidebar.button("💾 Baixar Backup Completo"):
-    zip_buffer = gerar_backup_zip()
+st.sidebar.markdown("### 🛡️ Segurança (Nuvem)")
+if st.sidebar.button("💾 Baixar Backup da Nuvem"):
+    st.info("Baixando dados do Google Sheets...")
+    zip_buffer = gerar_backup_zip_nuvem()
     st.sidebar.download_button(
-        label="⬇️ Clique para Salvar Backup",
+        label="⬇️ Salvar Backup da Nuvem",
         data=zip_buffer,
-        file_name=f"backup_sistema_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
+        file_name=f"backup_nuvem_{prefixo}_{datetime.now().strftime('%Y%m%d_%H%M')}.zip",
         mime="application/zip"
     )
 st.sidebar.markdown("---")
@@ -165,95 +245,104 @@ def filtrar_dados_inteligente(df, coluna_busca, texto_busca):
     mask = df[coluna_busca].astype(str).apply(lambda x: normalizar_para_busca(texto_busca) in normalizar_para_busca(x))
     return df[mask]
 
-# --- 🔐 LOG DE AUDITORIA (NOVO) ---
+# --- 🔐 LOG DE AUDITORIA (NA NUVEM) ---
 def registrar_auditoria(prefixo, produto, qtd_antes, qtd_nova, acao, motivo="Manual"):
-    """Grava um log invisível de alterações manuais."""
+    """Grava um log na nuvem."""
     try:
-        arquivo_log = f"{prefixo}_log_auditoria.xlsx"
+        aba_log = f"{prefixo}_log_auditoria"
         novo_log = {
-            'data_hora': obter_hora_manaus(),
+            'data_hora': str(obter_hora_manaus()),
             'produto': produto,
             'qtd_antes': qtd_antes,
             'qtd_nova': qtd_nova,
             'acao': acao,
             'motivo': motivo
         }
-        if os.path.exists(arquivo_log):
-            df_log = pd.read_excel(arquivo_log)
-            df_log = pd.concat([df_log, pd.DataFrame([novo_log])], ignore_index=True)
-        else:
-            df_log = pd.DataFrame([novo_log])
-        df_log.to_excel(arquivo_log, index=False)
+        df_log = carregar_do_google(aba_log)
+        df_log = pd.concat([df_log, pd.DataFrame([novo_log])], ignore_index=True)
+        salvar_no_google(df_log, aba_log)
     except Exception as e:
         print(f"Erro ao salvar log: {e}")
 
-# --- 🔐 MEMÓRIA DE VENDAS PROCESSADAS (NOVO) ---
+# --- 🔐 MEMÓRIA DE VENDAS PROCESSADAS (NA NUVEM) ---
 def carregar_ids_processados(prefixo):
-    """Carrega lista de IDs de vendas já baixadas para evitar duplicidade."""
-    arquivo = f"{prefixo}_ids_vendas.csv"
-    if os.path.exists(arquivo):
-        try:
-            df_ids = pd.read_csv(arquivo)
-            return set(df_ids['id_transacao'].astype(str).tolist())
-        except: return set()
+    aba = f"{prefixo}_ids_vendas"
+    df_ids = carregar_do_google(aba)
+    if not df_ids.empty and 'id_transacao' in df_ids.columns:
+        return set(df_ids['id_transacao'].astype(str).tolist())
     return set()
 
 def salvar_ids_processados(prefixo, novos_ids):
-    """Salva novos IDs na lista de processados."""
-    arquivo = f"{prefixo}_ids_vendas.csv"
+    aba = f"{prefixo}_ids_vendas"
     if not novos_ids: return
     df_novo = pd.DataFrame({'id_transacao': list(novos_ids)})
-    if os.path.exists(arquivo):
-        df_antigo = pd.read_csv(arquivo)
+    df_antigo = carregar_do_google(aba)
+    
+    if not df_antigo.empty:
         df_final = pd.concat([df_antigo, df_novo]).drop_duplicates()
     else:
         df_final = df_novo
-    df_final.to_csv(arquivo, index=False)
+    salvar_no_google(df_final, aba)
 
 def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, nova_validade, prefixo_ignorar):
     todas_lojas = ["loja1", "loja2", "loja3"]
     for loja in todas_lojas:
         if loja == prefixo_ignorar: continue
-        arquivo = f"{loja}_estoque.xlsx"
-        if os.path.exists(arquivo):
+        
+        # CARREGA DA NUVEM
+        aba_outra = f"{loja}_estoque"
+        df_outra = carregar_do_google(aba_outra)
+        
+        if not df_outra.empty:
             try:
-                df_outra = pd.read_excel(arquivo)
+                # Normaliza colunas
                 df_outra.columns = df_outra.columns.str.strip().str.lower()
                 mask = df_outra['nome do produto'].astype(str) == str(nome_produto)
+                
                 if mask.any():
                     idx = df_outra[mask].index[0]
-                    qtd_antiga = df_outra.at[idx, 'qtd_central'] # Para log
+                    qtd_antiga = df_outra.at[idx, 'qtd_central']
                     df_outra.at[idx, 'qtd_central'] = qtd_nova_casa
                     if novo_custo is not None: df_outra.at[idx, 'preco_custo'] = novo_custo
                     if novo_venda is not None: df_outra.at[idx, 'preco_venda'] = novo_venda
                     if nova_validade is not None: df_outra.at[idx, 'validade'] = nova_validade
-                    df_outra.to_excel(arquivo, index=False)
-                    # Log na loja secundária também
+                    
+                    # SALVA NA NUVEM
+                    salvar_no_google(df_outra, aba_outra)
+                    
                     registrar_auditoria(loja, nome_produto, qtd_antiga, qtd_nova_casa, "Sincronização Automática", f"Origem: {prefixo_ignorar}")
             except Exception: pass
 
-# --- ARQUIVOS ---
+# --- ARQUIVOS (AGORA SÃO ABAS VIRTUAIS) ---
 def inicializar_arquivos(prefixo):
+    # No Google Sheets, criamos as abas sob demanda ao salvar.
+    # Mas podemos garantir que as colunas existam se a aba for vazia.
     arquivos = {
-        f"{prefixo}_estoque.xlsx": ['código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central', 'qtd_minima', 'validade', 'status_compra', 'qtd_comprada', 'preco_custo', 'preco_venda', 'categoria', 'ultimo_fornecedor', 'preco_sem_desconto'],
-        f"{prefixo}_historico_compras.xlsx": ['data', 'produto', 'fornecedor', 'qtd', 'preco_pago', 'total_gasto', 'numero_nota', 'desconto_total_money', 'preco_sem_desconto', 'obs_importacao'],
-        f"{prefixo}_movimentacoes.xlsx": ['data_hora', 'produto', 'qtd_movida'],
-        f"{prefixo}_vendas.xlsx": ['data_hora', 'produto', 'qtd_vendida', 'estoque_restante'],
-        f"{prefixo}_lista_compras.xlsx": ['produto', 'código_barras', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status'],
-        f"{prefixo}_log_auditoria.xlsx": ['data_hora', 'produto', 'qtd_antes', 'qtd_nova', 'acao', 'motivo']
+        f"{prefixo}_estoque": ['código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central', 'qtd_minima', 'validade', 'status_compra', 'qtd_comprada', 'preco_custo', 'preco_venda', 'categoria', 'ultimo_fornecedor', 'preco_sem_desconto'],
+        f"{prefixo}_historico_compras": ['data', 'produto', 'fornecedor', 'qtd', 'preco_pago', 'total_gasto', 'numero_nota', 'desconto_total_money', 'preco_sem_desconto', 'obs_importacao'],
+        f"{prefixo}_movimentacoes": ['data_hora', 'produto', 'qtd_movida'],
+        f"{prefixo}_vendas": ['data_hora', 'produto', 'qtd_vendida', 'estoque_restante'],
+        f"{prefixo}_lista_compras": ['produto', 'código_barras', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status'],
+        f"{prefixo}_log_auditoria": ['data_hora', 'produto', 'qtd_antes', 'qtd_nova', 'acao', 'motivo']
     }
-    for arquivo, colunas in arquivos.items():
-        if not os.path.exists(arquivo):
-            pd.DataFrame(columns=colunas).to_excel(arquivo, index=False)
+    # Verifica se carrega vazio e inicializa headers se precisar
+    for aba, colunas in arquivos.items():
+        df = carregar_do_google(aba)
+        if df.empty:
+            salvar_no_google(pd.DataFrame(columns=colunas), aba)
 
 def carregar_dados(prefixo_arquivo):
     try:
-        df = pd.read_excel(f"{prefixo_arquivo}_estoque.xlsx")
+        df = carregar_do_google(f"{prefixo_arquivo}_estoque")
+        if df.empty: return pd.DataFrame()
+        
         df.columns = df.columns.str.strip().str.lower()
         if 'preco_sem_desconto' not in df.columns: df['preco_sem_desconto'] = 0.0
+        
         cols_num = ['qtd.estoque', 'qtd_central', 'qtd_minima', 'qtd_comprada', 'preco_custo', 'preco_venda', 'preco_sem_desconto']
         for col in cols_num:
             if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            
         df['ultimo_fornecedor'] = df['ultimo_fornecedor'].fillna('')
         df['código de barras'] = df['código de barras'].apply(lambda x: str(x).replace('.0', '').strip() if pd.notnull(x) else "")
         df['nome do produto'] = df['nome do produto'].apply(lambda x: normalizar_texto(str(x)))
@@ -263,14 +352,24 @@ def carregar_dados(prefixo_arquivo):
 
 def carregar_historico(prefixo_arquivo):
     try:
-        df_h = pd.read_excel(f"{prefixo_arquivo}_historico_compras.xlsx")
+        df_h = carregar_do_google(f"{prefixo_arquivo}_historico_compras")
+        if df_h.empty: return pd.DataFrame()
+        
         df_h['data'] = pd.to_datetime(df_h['data'], errors='coerce')
+        # Converte numeros
+        cols_num = ['qtd', 'preco_pago', 'total_gasto', 'desconto_total_money', 'preco_sem_desconto']
+        for c in cols_num:
+             if c in df_h.columns: df_h[c] = pd.to_numeric(df_h[c], errors='coerce').fillna(0)
+
         if 'numero_nota' not in df_h.columns: df_h['numero_nota'] = ""
         if 'obs_importacao' not in df_h.columns: df_h['obs_importacao'] = ""
+        
         if 'desconto_total_money' not in df_h.columns:
             if 'desconto_obtido' in df_h.columns: df_h['desconto_total_money'] = df_h['desconto_obtido'] * df_h['qtd']
             else: df_h['desconto_total_money'] = 0.0
+            
         if 'preco_sem_desconto' not in df_h.columns: df_h['preco_sem_desconto'] = 0.0
+        
         mask_zerado = (df_h['preco_sem_desconto'] == 0) & (df_h['preco_pago'] > 0)
         df_h.loc[mask_zerado, 'preco_sem_desconto'] = df_h.loc[mask_zerado, 'preco_pago']
         return df_h
@@ -278,27 +377,30 @@ def carregar_historico(prefixo_arquivo):
 
 def carregar_movimentacoes(prefixo_arquivo):
     try:
-        df_m = pd.read_excel(f"{prefixo_arquivo}_movimentacoes.xlsx")
+        df_m = carregar_do_google(f"{prefixo_arquivo}_movimentacoes")
+        if df_m.empty: return pd.DataFrame()
         df_m['data_hora'] = pd.to_datetime(df_m['data_hora'], errors='coerce')
         return df_m
     except: return pd.DataFrame()
 
 def carregar_vendas(prefixo_arquivo):
     try:
-        df_v = pd.read_excel(f"{prefixo_arquivo}_vendas.xlsx")
+        df_v = carregar_do_google(f"{prefixo_arquivo}_vendas")
+        if df_v.empty: return pd.DataFrame()
         df_v['data_hora'] = pd.to_datetime(df_v['data_hora'], errors='coerce')
         return df_v
     except: return pd.DataFrame()
 
 def carregar_lista_compras(prefixo_arquivo):
     try:
-        df = pd.read_excel(f"{prefixo_arquivo}_lista_compras.xlsx")
-        # Garante que a coluna código de barras exista
+        df = carregar_do_google(f"{prefixo_arquivo}_lista_compras")
+        if df.empty: return pd.DataFrame()
         if 'código_barras' not in df.columns: df['código_barras'] = ""
+        if 'qtd_sugerida' in df.columns: df['qtd_sugerida'] = pd.to_numeric(df['qtd_sugerida'], errors='coerce')
         return df
     except: return pd.DataFrame()
 
-# --- XML ---
+# --- XML (MANTIDO INTACTO NA LÓGICA, SÓ AJUSTADO OS DADOS DE ENTRADA) ---
 def ler_xml_nfe(arquivo_xml, df_referencia):
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
@@ -387,32 +489,34 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
             dados_nota['itens'].append(item)
     return dados_nota
 
-# --- SALVAMENTO ---
-def salvar_estoque(df, prefixo): df.to_excel(f"{prefixo}_estoque.xlsx", index=False)
-def salvar_historico(df, prefixo): df.to_excel(f"{prefixo}_historico_compras.xlsx", index=False)
-def salvar_movimentacoes(df, prefixo): df.to_excel(f"{prefixo}_movimentacoes.xlsx", index=False)
-def salvar_vendas(df, prefixo): df.to_excel(f"{prefixo}_vendas.xlsx", index=False)
-def salvar_lista_compras(df, prefixo): df.to_excel(f"{prefixo}_lista_compras.xlsx", index=False)
+# --- SALVAMENTO (ADAPTADO PARA GOOGLE SHEETS) ---
+def salvar_estoque(df, prefixo): salvar_no_google(df, f"{prefixo}_estoque")
+def salvar_historico(df, prefixo): salvar_no_google(df, f"{prefixo}_historico_compras")
+def salvar_movimentacoes(df, prefixo): salvar_no_google(df, f"{prefixo}_movimentacoes")
+def salvar_vendas(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas")
+def salvar_lista_compras(df, prefixo): salvar_no_google(df, f"{prefixo}_lista_compras")
 
 # ==============================================================================
 # 🚀 INÍCIO DO APP
 # ==============================================================================
 
+# Verifica arquivos/abas na nuvem
 inicializar_arquivos(prefixo)
+
+# Carrega tudo da nuvem
 df = carregar_dados(prefixo)
 df_hist = carregar_historico(prefixo)
 df_mov = carregar_movimentacoes(prefixo)
 df_vendas = carregar_vendas(prefixo)
 df_oficial = carregar_base_oficial()
 df_lista_compras = carregar_lista_compras(prefixo)
-ids_processados = carregar_ids_processados(prefixo) # Carrega IDs já baixados
+ids_processados = carregar_ids_processados(prefixo)
 
 if df is not None:
     st.sidebar.title("🏪 Menu")
-    # MENU ATUALIZADO: REMOVIDO "FORNECEDOR"
     modo = st.sidebar.radio("Navegar:", [
         "📊 Dashboard (Visão Geral)",
-        "⚖️ Conciliação (Shoppbud vs App)", # NOVO MENU
+        "⚖️ Conciliação (Shoppbud vs App)",
         "🚚 Transferência em Massa (Picklist)",
         "📝 Lista de Compras (Planejamento)",
         "🆕 Cadastrar Produto", 
@@ -421,15 +525,14 @@ if df is not None:
         "🔄 Sincronizar (Planograma)",
         "📉 Baixar Vendas (Do Relatório)",
         "🏠 Gôndola (Loja)", 
-        # Menu "Fornecedor" removido conforme solicitado
-        "💰 Inteligência de Compras (Histórico)", # NOME MELHORADO
+        "💰 Inteligência de Compras (Histórico)",
         "🏡 Estoque Central (Casa)",
         "📋 Tabela Geral"
     ])
 
-    # 1. DASHBOARD (COM PAINEL DE VENCIMENTO INTELIGENTE)
+    # 1. DASHBOARD
     if modo == "📊 Dashboard (Visão Geral)":
-        st.title(f"📊 Painel de Controle - {loja_atual}")
+        st.title(f"📊 Painel de Controle (Nuvem) - {loja_atual}")
         if df.empty:
             st.info("Comece cadastrando produtos.")
         else:
@@ -450,7 +553,6 @@ if df is not None:
             if not baixo_estoque.empty:
                 st.warning(f"🚨 Existem {len(baixo_estoque)} produtos com estoque baixo! Vá em 'Lista de Compras' para ver.")
             
-            # --- PAINEL VENCIMENTO MELHORADO ---
             st.markdown("### 🚨 Gestão de Vencimentos")
             if not df_critico.empty:
                 filtro_venc = st.text_input("🔍 Buscar produtos vencendo:", placeholder="Nome...")
@@ -465,20 +567,18 @@ if df is not None:
                 )
                 
                 if st.button("💾 SALVAR CORREÇÕES DE VENCIMENTO"):
-                    # Lógica para achar quem mudou no dataframe original
                     for i, row in df_venc_edit.iterrows():
-                        # Busca no df original pelo nome (assumindo unico) ou idealmente ID/Codigo
                         mask = df['nome do produto'] == row['nome do produto']
                         if mask.any():
                             df.loc[mask, 'validade'] = row['validade']
                             df.loc[mask, 'qtd.estoque'] = row['qtd.estoque']
                     salvar_estoque(df, prefixo)
-                    st.success("Vencimentos atualizados!")
+                    st.success("Vencimentos atualizados na Nuvem!")
                     st.rerun()
             else:
                 st.success("Nenhum produto vencendo nos próximos 5 dias.")
 
-    # 1.2 MÓDULO: CONCILIAÇÃO (NOVO E CORRIGIDO PARA NOMES DO EXCEL)
+    # 1.2 CONCILIAÇÃO
     elif modo == "⚖️ Conciliação (Shoppbud vs App)":
         st.title("⚖️ Conciliação de Estoque")
         st.markdown("""
@@ -491,17 +591,13 @@ if df is not None:
         if arq_planograma:
             try:
                 df_plan = pd.read_excel(arq_planograma)
-                # --- CORREÇÃO: BUSCA INTELIGENTE DE COLUNAS (COM OU SEM ACENTO) ---
                 col_cod_plan = next((c for c in df_plan.columns if ('código' in c.lower() or 'codigo' in c.lower()) and 'barras' in c.lower()), None)
                 col_qtd_plan = next((c for c in df_plan.columns if 'qtd' in c.lower() and 'estoque' in c.lower()), None)
-                # ------------------------------------------------------------------
                 
                 if col_cod_plan and col_qtd_plan:
-                    # Preparar comparação
                     df_plan['código normalizado'] = df_plan[col_cod_plan].astype(str).str.replace('.0', '').str.strip()
                     df['código normalizado'] = df['código de barras'].astype(str).str.replace('.0', '').str.strip()
                     
-                    # Merge (Cruzamento)
                     df_concilia = pd.merge(
                         df[['código normalizado', 'nome do produto', 'qtd.estoque']],
                         df_plan[[col_cod_plan, col_qtd_plan, 'código normalizado']],
@@ -509,7 +605,6 @@ if df is not None:
                         how='inner'
                     )
                     
-                    # Calcular Diferença
                     df_concilia['Diferença'] = df_concilia['qtd.estoque'] - df_concilia[col_qtd_plan]
                     df_divergente = df_concilia[df_concilia['Diferença'] != 0].copy()
                     
@@ -518,10 +613,8 @@ if df is not None:
                     else:
                         st.warning(f"⚠️ Encontradas {len(df_divergente)} divergências.")
                         
-                        # Adicionar coluna de decisão para o usuario
                         df_divergente['✅ Aceitar Qtd Shoppbud (Corrigir App)'] = False
                         
-                        # Mostrar tabela editável
                         st.markdown("### 📋 Painel de Decisão")
                         df_editor_concilia = st.data_editor(
                             df_divergente[['nome do produto', 'qtd.estoque', col_qtd_plan, 'Diferença', '✅ Aceitar Qtd Shoppbud (Corrigir App)']],
@@ -536,13 +629,11 @@ if df is not None:
                         
                         c_esq, c_dir = st.columns(2)
                         
-                        # BOTÃO ESQUERDO: CORRIGIR APP
                         with c_esq:
                             if st.button("💾 ATUALIZAR MEU APP (Esquerda)", type="primary"):
                                 itens_corrigidos = 0
                                 for idx, row in df_editor_concilia.iterrows():
                                     if row['✅ Aceitar Qtd Shoppbud (Corrigir App)']:
-                                        # Achar produto no DF principal e atualizar
                                         mask = df['nome do produto'] == row['nome do produto']
                                         if mask.any():
                                             qtd_shopp = row[col_qtd_plan]
@@ -554,18 +645,14 @@ if df is not None:
                                 st.success(f"✅ {itens_corrigidos} itens corrigidos no seu App!")
                                 st.rerun()
 
-                        # BOTÃO DIREITO: EXPORTAR PARA SHOPPBUD
                         with c_dir:
-                            # Filtra o que NÃO foi marcado para aceitar (ou seja, o Shoppbud está errado)
                             df_export = df_divergente[~df_editor_concilia['✅ Aceitar Qtd Shoppbud (Corrigir App)']].copy()
                             if not df_export.empty:
                                 buffer = BytesIO()
-                                # --- CORREÇÃO: USAR ENGINE PADRÃO (SEM XLSXWRITER OBRIGATÓRIO) ---
                                 with pd.ExcelWriter(buffer) as writer:
-                                    # Formato simples para importar no Shoppbud
                                     df_export_final = pd.DataFrame({
                                         'Código de Barras': df_export['código normalizado'],
-                                        'Quantidade': df_export['qtd.estoque'] # Manda a qtd do App (correta)
+                                        'Quantidade': df_export['qtd.estoque'] 
                                     })
                                     df_export_final.to_excel(writer, index=False)
                                 
@@ -576,40 +663,32 @@ if df is not None:
                                     mime="application/vnd.ms-excel"
                                 )
                 else:
-                    st.error(f"Não encontrei colunas 'Código de Barras' ou 'Codigo de Barras' e 'Qtd Estoque' no arquivo. Colunas encontradas: {df_plan.columns.tolist()}")
+                    st.error(f"Não encontrei colunas corretas no arquivo. Encontradas: {df_plan.columns.tolist()}")
             except Exception as e: st.error(f"Erro ao ler arquivo: {e}")
 
-
-    # 1.5 MÓDULO: TRANSFERÊNCIA VIA PICKLIST
+    # 1.5 TRANSFERÊNCIA PICKLIST
     elif modo == "🚚 Transferência em Massa (Picklist)":
         st.title(f"🚚 Transferência em Massa - {loja_atual}")
         st.markdown("**Sistema Shoppbud/Transferência:** Suba os arquivos Excel para mover estoque da Casa para a Loja.")
         
-        # MODO MANUAL DE SELEÇÃO DE COLUNAS (PARA EVITAR ERRO DE NOME)
-        # ATUALIZAÇÃO: AGORA ACEITA MÚLTIPLOS ARQUIVOS
         arquivos_pick = st.file_uploader("📂 Subir Picklist (.xlsx)", type=['xlsx', 'xls'], accept_multiple_files=True)
         
         if arquivos_pick:
             try:
-                # 1. Combina todos os arquivos em um único DataFrame
                 lista_dfs = []
-                st.info(f"📂 {len(arquivos_pick)} arquivos carregados. O sistema irá juntá-los automaticamente.")
+                st.info(f"📂 {len(arquivos_pick)} arquivos carregados.")
                 
-                # Lê o cabeçalho do primeiro arquivo para configurar
                 primeiro_arquivo = arquivos_pick[0]
                 df_temp_raw = pd.read_excel(primeiro_arquivo, header=None)
-                st.info("Visualização das primeiras linhas (para conferência das colunas):")
                 st.dataframe(df_temp_raw.head(5))
                 
                 linha_cabecalho = st.number_input("Em qual linha estão os títulos (cabeçalho)?", min_value=0, value=0)
                 
-                # Processa todos os arquivos
                 for arq in arquivos_pick:
                     arq.seek(0)
                     df_temp = pd.read_excel(arq, header=linha_cabecalho)
                     lista_dfs.append(df_temp)
                 
-                # Cria o DataFrame unificado
                 df_pick = pd.concat(lista_dfs, ignore_index=True)
                 cols = df_pick.columns.tolist()
                 
@@ -625,16 +704,13 @@ if df is not None:
                     bar = st.progress(0)
                     log_movs = []
                     total_linhas = len(df_pick)
-                    
                     nao_encontrados = []
 
                     for i, row in df_pick.iterrows():
-                        # LIMPEZA RIGOROSA DO CÓDIGO DA PICKLIST
                         cod_pick = str(row[col_barras]).replace('.0', '').strip()
                         qtd_pick = pd.to_numeric(row[col_qtd], errors='coerce')
                         
                         if qtd_pick > 0:
-                            # Busca exata
                             mask = df['código de barras'] == cod_pick
                             
                             if mask.any():
@@ -642,16 +718,12 @@ if df is not None:
                                 nome_prod = df.at[idx, 'nome do produto']
                                 qtd_antiga_loja = df.at[idx, 'qtd.estoque']
                                 
-                                # APLICA A TRANSFERÊNCIA NO DATAFRAME PRINCIPAL
                                 df.at[idx, 'qtd_central'] -= qtd_pick
                                 df.at[idx, 'qtd.estoque'] += qtd_pick
                                 
-                                log_movs.append({'data_hora': obter_hora_manaus(), 'produto': nome_prod, 'qtd_movida': qtd_pick})
+                                log_movs.append({'data_hora': str(obter_hora_manaus()), 'produto': nome_prod, 'qtd_movida': qtd_pick})
                                 
-                                # SINCRONIZA ESTOQUE CASA GLOBAL (IMPORTANTE!)
                                 atualizar_casa_global(nome_prod, df.at[idx, 'qtd_central'], None, None, None, prefixo)
-                                
-                                # Log Auditoria
                                 registrar_auditoria(prefixo, nome_prod, qtd_antiga_loja, df.at[idx, 'qtd.estoque'], "Transferência Picklist")
                                 movidos += 1
                             else:
@@ -659,7 +731,6 @@ if df is not None:
                                 nao_encontrados.append(f"{cod_pick}")
                         bar.progress((i+1)/total_linhas)
                     
-                    # SALVA O ESTOQUE ATUALIZADO (CRUCIAL!)
                     salvar_estoque(df, prefixo)
                     
                     if log_movs:
@@ -668,22 +739,20 @@ if df is not None:
                     
                     st.success(f"✅ {movidos} produtos transferidos com sucesso!")
                     if erros > 0: 
-                        st.warning(f"⚠️ {erros} produtos não encontrados ou com código diferente no sistema.")
+                        st.warning(f"⚠️ {erros} produtos não encontrados.")
                         st.write("Códigos não encontrados:", nao_encontrados)
             except Exception as e: st.error(f"Erro ao ler arquivo: {e}")
 
-    # 1.6 MÓDULO: LISTA DE COMPRAS
+    # 1.6 LISTA DE COMPRAS
     elif modo == "📝 Lista de Compras (Planejamento)":
         st.title("📝 Planejamento de Compras")
         tab_lista, tab_add = st.tabs(["📋 Ver Lista Atual", "➕ Adicionar Itens"])
         with tab_lista:
             if not df_lista_compras.empty:
-                st.info("💡 Esta é sua lista de compras. Quando for ao mercado, use esta tabela.")
+                st.info("💡 Esta é sua lista de compras.")
                 if usar_modo_mobile:
-                    # --- MODO CELULAR COM VISUALIZAÇÃO DE ESTOQUE (RAIO-X) ---
                     st.markdown("### 🛒 Itens da Lista (Clique para ver Estoque)")
                     for idx, row in df_lista_compras.iterrows():
-                        # Busca informações de estoque em tempo real
                         dados_estoque = df[df['nome do produto'] == row['produto']]
                         qtd_loja_atual = 0
                         qtd_casa_atual = 0
@@ -691,7 +760,6 @@ if df is not None:
                             qtd_loja_atual = int(dados_estoque.iloc[0]['qtd.estoque'])
                             qtd_casa_atual = int(dados_estoque.iloc[0]['qtd_central'])
                         
-                        # Cria o expander clicável
                         with st.expander(f"🛒 {row['código_barras']} - {row['produto']}"):
                             c1, c2 = st.columns(2)
                             c1.metric("Estoque Loja", qtd_loja_atual)
@@ -747,7 +815,6 @@ if df is not None:
             st.divider()
             st.subheader("✋ Adicionar Manualmente")
             with st.form("add_manual_lista"):
-                # Lista com código para facilitar busca
                 lista_visuais = (df['código de barras'].astype(str) + " - " + df['nome do produto'].astype(str)).unique().tolist()
                 lista_visuais = sorted(lista_visuais)
                 prod_man_visual = st.selectbox("Produto:", [""] + lista_visuais)
@@ -757,19 +824,15 @@ if df is not None:
                 obs_man = c_forn.text_input("Fornecedor/Obs (Opcional):", placeholder="Ex: Atacadão")
                 
                 c_dt, c_hr = st.columns(2)
-                
-                # CORREÇÃO DEFINITIVA DO RELÓGIO (TRAVA DE MEMÓRIA PARA LISTA DE COMPRAS)
                 if 'hora_lista_fixa' not in st.session_state:
                     st.session_state['hora_lista_fixa'] = obter_hora_manaus().time().replace(second=0, microsecond=0)
                 
                 hora_padrao_lista = st.session_state['hora_lista_fixa']
-                
                 dt_manual = c_dt.date_input("Data:", value=obter_hora_manaus().date())
                 hr_manual = c_hr.time_input("Hora:", value=hora_padrao_lista, step=60)
                 
                 if st.form_submit_button("Adicionar à Lista"):
                     if prod_man_visual:
-                        # Extrai código e nome
                         try:
                             parts = prod_man_visual.split(' - ', 1)
                             cod_barras_add = parts[0]
@@ -782,7 +845,6 @@ if df is not None:
                         mask = df['nome do produto'] == nome_prod_add
                         if mask.any(): preco_ref = df.loc[mask, 'preco_custo'].values[0]
                         
-                        # Correção de Salvamento: Usa a hora manual escolhida
                         data_formatada = datetime.combine(dt_manual, hr_manual).strftime("%d/%m/%Y %H:%M")
                         
                         novo_item = {
@@ -835,52 +897,38 @@ if df is not None:
                     df = pd.concat([df, pd.DataFrame([novo])], ignore_index=True)
                     salvar_estoque(df, prefixo)
                     registrar_auditoria(prefixo, novo_nome.upper().strip(), 0, ini_loja, "Novo Cadastro")
-                    st.success("Cadastrado!")
+                    st.success("Cadastrado na Nuvem!")
                     st.rerun()
 
-    # 2.5 IMPORTAR XML (REFORMULADO)
+    # 2.5 IMPORTAR XML
     elif modo == "📥 Importar XML (Associação Inteligente)":
         st.title(f"📥 Importar XML da Nota Fiscal")
-        st.markdown("O sistema tentará encontrar os produtos. **Confirme se o vínculo está correto antes de salvar.**")
+        st.markdown("O sistema tentará encontrar os produtos.")
         
-        # --- SELETOR DE MODO DE IMPORTAÇÃO ---
         modo_import = st.radio("Modo de Importação:", ["📦 Atualizar Estoque (Entrada)", "📖 Apenas Referência (Histórico de Preços)"], horizontal=True)
-        # -------------------------------------
         
         if df_oficial.empty:
-            st.warning("⚠️ DICA: Vá em 'Configurar Base Oficial' e suba sua lista de produtos para melhorar a identificação automática.")
+            st.warning("⚠️ DICA: Configure Base Oficial para melhorar identificação.")
         arquivo_xml = st.file_uploader("Arraste o XML aqui", type=['xml'])
         if arquivo_xml:
             try:
                 dados = ler_xml_nfe(arquivo_xml, df_oficial)
                 st.success(f"Nota Fiscal: **{dados['numero']}** | Fornecedor: **{dados['fornecedor']}**")
                 
-                # --- DATA MANUAL DO XML (CORREÇÃO DE HORA COM TRAVA) ---
                 c_data, c_hora = st.columns(2)
-                
-                # CORREÇÃO DEFINITIVA DO RELÓGIO (TRAVA DE MEMÓRIA)
-                # Cria uma chave única baseada no nome do arquivo para não resetar o relógio
                 chave_hora = f"hora_xml_{arquivo_xml.name}"
                 if chave_hora not in st.session_state:
-                    # Salva a hora APENAS na primeira vez que carrega o arquivo
                     st.session_state[chave_hora] = obter_hora_manaus().time().replace(second=0, microsecond=0)
                 
                 hora_padrao_congelada = st.session_state[chave_hora]
-                
                 data_xml_padrao = dados['data'].date() if dados['data'] else obter_hora_manaus().date()
                 data_escolhida = c_data.date_input("📅 Data da Compra/Entrada (Histórico):", value=data_xml_padrao)
-                
-                # Ajuste: Usa a hora congelada no value
                 hora_escolhida = c_hora.time_input("⏰ Hora:", value=hora_padrao_congelada, step=60)
-                
                 data_final_historico = datetime.combine(data_escolhida, hora_escolhida)
-                # --------------------------
 
                 st.markdown("---")
                 st.subheader("🛠️ Conferência e Cálculo de Descontos")
                 
-                # Lista COMPLETA e NORMALIZADA para o dropdown
-                # ALTERAÇÃO VISUAL: CODIGO - NOME
                 lista_visuais = (df['código de barras'].astype(str) + " - " + df['nome do produto'].astype(str)).unique().tolist()
                 lista_visuais = sorted(lista_visuais)
                 lista_produtos_sistema = ["(CRIAR NOVO)"] + lista_visuais
@@ -898,7 +946,6 @@ if df is not None:
                     tipo_match = "Nenhum"
                     
                     if not df.empty:
-                        # 1. Tenta Código de Barras
                         mask_ean = df['código de barras'].astype(str) == ean_xml
                         if mask_ean.any():
                             nome_bd = df.loc[mask_ean, 'nome do produto'].values[0]
@@ -906,11 +953,9 @@ if df is not None:
                             match_inicial = f"{cod_bd} - {nome_bd}"
                             tipo_match = "Código de Barras (Exato)"
                         else:
-                            # 2. Tenta Nova Busca por Palavras
                             lista_nomes = df['nome do produto'].astype(str).tolist()
                             melhor_nome, tipo_encontrado = encontrar_melhor_match(nome_xml, lista_nomes)
                             if melhor_nome:
-                                # Reconstrói o visual code - name
                                 mask_nm = df['nome do produto'] == melhor_nome
                                 if mask_nm.any():
                                     cod_bd = df.loc[mask_nm, 'código de barras'].values[0]
@@ -922,8 +967,7 @@ if df is not None:
                         st.markdown(f"📄 XML: **{nome_xml}**")
                         st.caption(f"EAN XML: `{ean_xml}` | Qtd: {int(qtd_xml)}")
                         st.markdown(f"💰 Tabela: R$ {p_bruto:.2f} | **Pago (Desc): R$ {p_liq:.2f}**")
-                        if desc_total > 0:
-                            st.caption(f"📉 Desconto Total na nota: R$ {desc_total:.2f}")
+                        if desc_total > 0: st.caption(f"📉 Desconto Total na nota: R$ {desc_total:.2f}")
 
                     with c2:
                         idx_inicial = 0
@@ -954,20 +998,16 @@ if df is not None:
                         nome_xml = str(item['nome']).strip()
                         
                         nome_final = ""
-                        
-                        # Extrai nome puro da escolha visual "COD - NOME"
                         if produto_escolhido != "(CRIAR NOVO)":
                             nome_final = produto_escolhido.split(' - ', 1)[1]
                         else:
                             nome_final = nome_xml.upper()
 
-                        # LÓGICA DE CRIAÇÃO / ATUALIZAÇÃO
                         if produto_escolhido == "(CRIAR NOVO)":
-                            # Cria mesmo se for referência (para ter o cadastro)
                             novo_prod = {
                                 'código de barras': ean_xml, 
                                 'nome do produto': nome_final,
-                                'qtd.estoque': qtd_xml if "Atualizar Estoque" in modo_import else 0, # Só soma se não for Ref
+                                'qtd.estoque': qtd_xml if "Atualizar Estoque" in modo_import else 0,
                                 'qtd_central': 0, 'qtd_minima': 5,
                                 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0,
                                 'preco_custo': preco_pago, 'preco_venda': preco_pago * 2,
@@ -982,28 +1022,19 @@ if df is not None:
                             mask = df['nome do produto'].astype(str) == nome_final
                             if mask.any():
                                 idx = df[mask].index[0]
-                                qtd_antiga = df.at[idx, 'qtd.estoque'] # Log
-                                
-                                # SOMA ESTOQUE APENAS SE MODO PADRÃO
                                 if "Atualizar Estoque" in modo_import:
-                                    # Se for estoque central ou loja? Padrão XML geralmente vai pra Central ou Loja?
-                                    # O código original somava em 'qtd_central' no XML
                                     df.at[idx, 'qtd_central'] += qtd_xml 
                                     registrar_auditoria(prefixo, nome_final, df.at[idx, 'qtd_central']-qtd_xml, df.at[idx, 'qtd_central'], "XML - Entrada Estoque")
                                 
-                                # Atualiza preços sempre
                                 df.at[idx, 'preco_custo'] = preco_pago
                                 df.at[idx, 'preco_sem_desconto'] = preco_sem_desc
                                 df.at[idx, 'ultimo_fornecedor'] = dados['fornecedor']
                                 atualizados_cont += 1
-                                
-                                # Sincroniza Casa Global
                                 atualizar_casa_global(nome_final, df.at[idx, 'qtd_central'], preco_pago, None, None, prefixo)
                         
-                        # HISTÓRICO DE COMPRAS (Sempre Grava)
                         obs_tag = "(REF)" if "Referência" in modo_import else ""
                         novos_hist.append({
-                            'data': data_final_historico, # Usa a data escolhida
+                            'data': str(data_final_historico), # STR PARA JSON
                             'produto': nome_final, 'fornecedor': dados['fornecedor'], 
                             'qtd': qtd_xml, 'preco_pago': preco_pago, 'total_gasto': qtd_xml * preco_pago,
                             'numero_nota': dados['numero'], 'desconto_total_money': desc_total_val, 'preco_sem_desconto': preco_sem_desc,
@@ -1023,36 +1054,24 @@ if df is not None:
     # 2.8 CONFIGURAR BASE OFICIAL
     elif modo == "⚙️ Configurar Base Oficial":
         st.title("⚙️ Configurar Base de Produtos Oficial")
-        st.markdown("""
-        Suba aqui o arquivo **product-2025...** exportado do sistema.
-        Isso ajuda o app a preencher os códigos de barras automaticamente quando o XML não trouxer.
-        """)
         arquivo_base = st.file_uploader("Suba o arquivo Excel/CSV aqui", type=['xlsx', 'csv'])
         if arquivo_base:
             if st.button("🚀 Processar e Salvar Base"):
                 sucesso = processar_excel_oficial(arquivo_base)
                 if sucesso:
-                    st.success("Base Oficial atualizada com sucesso! Agora as importações de XML serão automáticas.")
+                    st.success("Base Oficial atualizada na nuvem!")
                     st.rerun()
 
-    # 3. SINCRONIZAR (CORRIGIDO: AGORA CRIA NOVOS PRODUTOS!)
+    # 3. SINCRONIZAR
     elif modo == "🔄 Sincronizar (Planograma)":
         st.title(f"🔄 Sincronizar - {loja_atual}")
-        st.info("💡 Este módulo agora IMPORTA produtos novos da planilha e atualiza os existentes.")
-        
-        arquivo = st.file_uploader("📂 Arquivo Planograma (XLSX ou CSV)", type=['xlsx', 'xls', 'csv'])
+        arquivo = st.file_uploader("📂 Arquivo Planograma", type=['xlsx', 'xls', 'csv'])
         if arquivo:
             try:
-                # Leitura robusta (CSV ou Excel)
-                if arquivo.name.endswith('.csv'):
-                    df_raw = pd.read_csv(arquivo, header=None)
-                else:
-                    df_raw = pd.read_excel(arquivo, header=None)
+                if arquivo.name.endswith('.csv'): df_raw = pd.read_csv(arquivo, header=None)
+                else: df_raw = pd.read_excel(arquivo, header=None)
                 
-                st.write("Identifique as colunas:")
-                st.dataframe(df_raw.head())
                 cols = df_raw.columns.tolist()
-                
                 c1, c2, c3, c4 = st.columns(4)
                 idx_barras = c1.selectbox("Coluna CÓDIGO BARRAS", cols, index=0)
                 idx_nome = c2.selectbox("Coluna NOME DO PRODUTO", cols, index=1 if len(cols)>1 else 0)
@@ -1060,15 +1079,13 @@ if df is not None:
                 opcoes_preco = ["(Não Atualizar Preço)"] + cols
                 idx_preco = c4.selectbox("Coluna PREÇO VENDA", opcoes_preco)
                 
-                if st.button("🚀 SINCRONIZAR TUDO (Importar + Atualizar)"):
+                if st.button("🚀 SINCRONIZAR TUDO"):
                     df = carregar_dados(prefixo)
-                    
                     alt = 0
                     novos = 0
                     bar = st.progress(0)
                     total_linhas = len(df_raw)
                     novos_produtos = []
-
                     start_row = 1 
                     
                     for i in range(start_row, total_linhas):
@@ -1076,47 +1093,33 @@ if df is not None:
                             cod = str(df_raw.iloc[i, idx_barras]).replace('.0', '').strip()
                             nome_planilha = str(df_raw.iloc[i, idx_nome]).strip()
                             qtd = pd.to_numeric(df_raw.iloc[i, idx_qtd], errors='coerce')
-                            
                             nome_norm = normalizar_texto(nome_planilha)
 
                             if cod and nome_norm and pd.notnull(qtd):
                                 mask = df['código de barras'] == cod
-                                
                                 if mask.any():
-                                    # ATUALIZA EXISTENTE
                                     idx = df[mask].index[0]
                                     qtd_antiga = df.at[idx, 'qtd.estoque']
                                     df.loc[mask, 'qtd.estoque'] = qtd
-                                    # Log Auditoria
                                     if qtd_antiga != qtd:
                                         registrar_auditoria(prefixo, nome_norm, qtd_antiga, qtd, "Sincronização Planograma")
 
                                     if idx_preco != "(Não Atualizar Preço)":
                                         val_preco = pd.to_numeric(df_raw.iloc[i, idx_preco], errors='coerce')
-                                        if pd.notnull(val_preco):
-                                            df.loc[mask, 'preco_venda'] = val_preco
+                                        if pd.notnull(val_preco): df.loc[mask, 'preco_venda'] = val_preco
                                     alt += 1
                                 else:
-                                    # CRIA NOVO (CORREÇÃO CRÍTICA APLICADA)
                                     novo_preco_venda = 0.0
                                     if idx_preco != "(Não Atualizar Preço)":
                                         val_p = pd.to_numeric(df_raw.iloc[i, idx_preco], errors='coerce')
                                         if pd.notnull(val_p): novo_preco_venda = val_p
                                     
                                     novo_prod = {
-                                        'código de barras': cod,
-                                        'nome do produto': nome_norm,
-                                        'qtd.estoque': qtd,
-                                        'qtd_central': 0,
-                                        'qtd_minima': 5,
-                                        'validade': None,
-                                        'status_compra': 'OK',
-                                        'qtd_comprada': 0,
-                                        'preco_custo': 0.0,
-                                        'preco_venda': novo_preco_venda,
-                                        'categoria': 'GERAL',
-                                        'ultimo_fornecedor': '',
-                                        'preco_sem_desconto': 0.0
+                                        'código de barras': cod, 'nome do produto': nome_norm,
+                                        'qtd.estoque': qtd, 'qtd_central': 0, 'qtd_minima': 5,
+                                        'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0,
+                                        'preco_custo': 0.0, 'preco_venda': novo_preco_venda,
+                                        'categoria': 'GERAL', 'ultimo_fornecedor': '', 'preco_sem_desconto': 0.0
                                     }
                                     novos_produtos.append(novo_prod)
                                     novos += 1
@@ -1128,28 +1131,21 @@ if df is not None:
                         registrar_auditoria(prefixo, "Vários", 0, len(novos_produtos), "Sincronização - Novos Produtos")
                     
                     salvar_estoque(df, prefixo)
-                    st.success(f"✅ Sucesso! {alt} produtos atualizados e {novos} NOVOS produtos cadastrados (incluindo a Coca Cola 2L!).")
-                    if novos > 0:
-                        st.balloons()
+                    st.success(f"✅ Sucesso! {alt} produtos atualizados e {novos} novos cadastrados.")
             except Exception as e: st.error(f"Erro: {e}")
 
-    # 4. BAIXAR VENDAS (COM TRAVA DE DATA)
+    # 4. BAIXAR VENDAS
     elif modo == "📉 Baixar Vendas (Do Relatório)":
         st.title(f"📉 Importar Vendas - {loja_atual}")
         tab_imp, tab_hist_vendas = st.tabs(["📂 Importar Arquivo", "📜 Histórico"])
         with tab_imp:
-            st.info("💡 DICA: Use o filtro de data abaixo para ignorar vendas antigas que possam estar 'escondidas' no Excel.")
-            
-            # --- FILTRO DE DATA ---
+            st.info("💡 DICA: Use o filtro de data.")
             c_dt, c_hr = st.columns(2)
-            # Pega data atual ajustada
             hora_padrao = obter_hora_manaus()
             data_corte = c_dt.date_input("🚫 Ignorar vendas ANTES do dia:", value=hora_padrao.date())
-            # A hora padrão aqui já entra como "19:00" como sugestão, mas editável
             hora_corte = c_hr.time_input("⏰ E antes do horário:", value=datetime.strptime("19:00", "%H:%M").time(), step=60)
             data_hora_corte = datetime.combine(data_corte, hora_corte)
-            st.warning(f"O sistema irá processar APENAS vendas feitas DEPOIS de: **{data_hora_corte.strftime('%d/%m/%Y %H:%M')}**")
-            # ----------------------
+            st.warning(f"Processando vendas DEPOIS de: **{data_hora_corte.strftime('%d/%m/%Y %H:%M')}**")
 
             arquivo_vendas = st.file_uploader("📂 Relatório de Vendas", type=['xlsx', 'xls'], key="up_vendas")
             if arquivo_vendas:
@@ -1176,16 +1172,13 @@ if df is not None:
                             novos_ids_processados = set()
                             bar = st.progress(0)
                             
-                            # --- CORREÇÃO DE ORDEM CRONOLÓGICA ---
                             try:
                                 df_vendas_temp[col_data] = pd.to_datetime(df_vendas_temp[col_data], dayfirst=True, errors='coerce')
                                 df_vendas_temp = df_vendas_temp.sort_values(by=col_data, ascending=True)
                             except: pass
-                            # -------------------------------------
 
                             total = len(df_vendas_temp)
                             for i, row in df_vendas_temp.iterrows():
-                                # 1. Filtro de ID (Duplicidade)
                                 if col_id != "(Ignorar)":
                                     id_venda = str(row[col_id]).strip()
                                     if id_venda in ids_processados or id_venda in novos_ids_processados:
@@ -1199,10 +1192,9 @@ if df is not None:
                                     if pd.isna(dt_v): dt_v = obter_hora_manaus()
                                 except: dt_v = obter_hora_manaus()
 
-                                # 2. Filtro de Data (Segurança)
                                 if dt_v < data_hora_corte:
                                     ignorados_data += 1
-                                    continue # Pula essa linha
+                                    continue
 
                                 if pd.isna(qtd) or qtd <= 0: continue
                                 
@@ -1214,7 +1206,7 @@ if df is not None:
                                     df.at[idx, 'qtd.estoque'] = antigo - qtd
                                     atualizados += 1
                                     novos_registros.append({
-                                        "data_hora": dt_v, "produto": df.at[idx, 'nome do produto'],
+                                        "data_hora": str(dt_v), "produto": df.at[idx, 'nome do produto'],
                                         "qtd_vendida": qtd, "estoque_restante": df.at[idx, 'qtd.estoque']
                                     })
                                     if col_id != "(Ignorar)":
@@ -1223,30 +1215,28 @@ if df is not None:
                                 bar.progress((i+1)/total)
                             
                             salvar_estoque(df, prefixo)
-                            salvar_ids_processados(prefixo, novos_ids_processados) # Salva IDs
+                            salvar_ids_processados(prefixo, novos_ids_processados)
                             
                             if novos_registros:
                                 df_vendas = pd.concat([df_vendas, pd.DataFrame(novos_registros)], ignore_index=True)
                                 salvar_vendas(df_vendas, prefixo)
                             
                             msg_final = f"✅ {atualizados} vendas baixadas com sucesso!"
-                            if ignorados_data > 0:
-                                msg_final += f"\n\n🛡️ {ignorados_data} vendas antigas ignoradas (Antes de {data_hora_corte.strftime('%H:%M')})."
-                            if ignorados_id > 0:
-                                msg_final += f"\n\n♻️ {ignorados_id} vendas duplicadas ignoradas."
+                            if ignorados_data > 0: msg_final += f"\n\n🛡️ {ignorados_data} vendas antigas ignoradas."
+                            if ignorados_id > 0: msg_final += f"\n\n♻️ {ignorados_id} vendas duplicadas ignoradas."
                                 
                             st.success(msg_final)
                 except Exception as e: st.error(f"Erro: {e}")
         with tab_hist_vendas:
-            # --- BOTÃO DE APAGAR HISTÓRICO ---
             if not df_vendas.empty:
                 if st.button("🗑️ Apagar Histórico de Vendas", type="primary"):
                     df_vendas = pd.DataFrame(columns=['data_hora', 'produto', 'qtd_vendida', 'estoque_restante'])
                     salvar_vendas(df_vendas, prefixo)
-                    # Limpa IDs também
-                    try: os.remove(f"{prefixo}_ids_vendas.csv")
+                    try:
+                        # Limpa IDs
+                        salvar_no_google(pd.DataFrame(), f"{prefixo}_ids_vendas")
                     except: pass
-                    st.success("Histórico limpo com sucesso!")
+                    st.success("Histórico limpo!")
                     st.rerun()
                 st.divider()
                 
@@ -1290,7 +1280,7 @@ if df is not None:
                                         registrar_auditoria(prefixo, row['nome do produto'], 0, q_tr, "Baixa Gôndola Mobile")
                                         st.success(f"Baixado {q_tr} un!")
                                         st.rerun()
-                            else: st.warning("🚫 Casa Zerada (Sem estoque para baixar)")
+                            else: st.warning("🚫 Casa Zerada")
             else:
                 tab_acao, tab_hist = st.tabs(["🚚 Repor / Consultar", "📜 Histórico"])
                 with tab_acao:
@@ -1311,11 +1301,8 @@ if df is not None:
                         with st.form("form_transf_gondola"):
                             c_dt, c_hr, c_qtd = st.columns(3)
                             dt_transf = c_dt.date_input("Data da Transferência:", obter_hora_manaus().date())
-                            # --- CORREÇÃO HORA ---
-                            # Pega hora atual limpa
                             hora_atual = obter_hora_manaus().time().replace(second=0, microsecond=0)
                             hr_transf = c_hr.time_input("Hora:", value=hora_atual, step=60)
-                            # ---------------------
                             
                             qtd_disponivel = int(df.at[idx, 'qtd_central'])
                             qtd_transf = c_qtd.number_input(f"Quantidade (Disp: {qtd_disponivel}):", min_value=0, max_value=qtd_disponivel, value=0)
@@ -1327,13 +1314,13 @@ if df is not None:
                                     salvar_estoque(df, prefixo)
                                     atualizar_casa_global(nome_prod, df.at[idx, 'qtd_central'], None, None, None, prefixo)
                                     data_final = datetime.combine(dt_transf, hr_transf)
-                                    novo_mov = {'data_hora': data_final, 'produto': nome_prod, 'qtd_movida': qtd_transf}
+                                    novo_mov = {'data_hora': str(data_final), 'produto': nome_prod, 'qtd_movida': qtd_transf}
                                     df_mov = pd.concat([df_mov, pd.DataFrame([novo_mov])], ignore_index=True)
                                     salvar_movimentacoes(df_mov, prefixo)
                                     registrar_auditoria(prefixo, nome_prod, 0, qtd_transf, "Transferência Gôndola Desktop")
-                                    st.success(f"Sucesso! {qtd_transf} unid. transferidas em {data_final}. Casa sincronizada.")
+                                    st.success(f"Sucesso! {qtd_transf} unid. transferidas.")
                                     st.rerun()
-                                else: st.warning("Quantidade inválida ou sem estoque na Casa.")
+                                else: st.warning("Quantidade inválida.")
                         
                         st.divider()
                         with st.expander("🛠️ Ajustes Manuais (Completo)"):
@@ -1364,29 +1351,19 @@ if df is not None:
                         df_mov_show = filtrar_dados_inteligente(df_mov, 'produto', busca_gondola_hist)
                         st.dataframe(df_mov_show.sort_values(by='data_hora', ascending=False), use_container_width=True, hide_index=True)
 
-    # 7. HISTÓRICO & PREÇOS (AGORA: INTELIGÊNCIA DE COMPRAS)
+    # 7. INTELIGÊNCIA COMPRAS
     elif modo == "💰 Inteligência de Compras (Histórico)":
         st.title("💰 Inteligência de Compras")
-        
         tab_graf, tab_dados = st.tabs(["📊 Análise & Gráficos", "📜 Histórico Completo (Editar)"])
         
         with tab_graf:
             if df_hist.empty:
-                st.info("Sem histórico suficiente para análises.")
+                st.info("Sem histórico suficiente.")
             else:
                 st.markdown("### 🏆 Ranking: Onde comprar mais barato?")
-                
-                # --- CRIA LISTA DE PRODUTOS COM CÓDIGO (INTELIGÊNCIA) ---
-                # Garante que temos a coluna 'produto' como string
                 df_hist['produto_str'] = df_hist['produto'].astype(str)
-                
-                # Se possível, vamos tentar recuperar o código de barras do produto atual
-                # para exibir bonito no dropdown (COD - NOME)
-                # Cruzamos com o DF atual para pegar o código
                 if not df.empty:
-                    # Cria um dicionário {Nome: Código}
                     mapa_codigos = dict(zip(df['nome do produto'], df['código de barras']))
-                    # Cria uma coluna temporária no histórico para exibição
                     df_hist['display_combo'] = df_hist['produto_str'].map(mapa_codigos).fillna('?') + " - " + df_hist['produto_str']
                 else:
                     df_hist['display_combo'] = df_hist['produto_str']
@@ -1395,25 +1372,17 @@ if df is not None:
                 prod_sel_graf_raw = st.selectbox("Selecione um Produto para analisar:", lista_prods_hist)
                 
                 if prod_sel_graf_raw:
-                    # Extrai o nome puro de volta para filtrar no histórico
-                    # Se o formato for "COD - NOME", pegamos o NOME (parte depois do " - ")
                     if " - " in prod_sel_graf_raw:
                         nome_para_filtro = prod_sel_graf_raw.split(" - ", 1)[1]
                     else:
                         nome_para_filtro = prod_sel_graf_raw
 
-                    # Filtra dados do produto usando o nome
                     df_prod = df_hist[df_hist['produto'] == nome_para_filtro].copy()
                     
-                    # Gráfico 1: Preço Médio por Fornecedor
                     if not df_prod.empty:
                         df_ranking = df_prod.groupby('fornecedor')['preco_pago'].mean().sort_values()
                         st.bar_chart(df_ranking)
-                        st.caption("Preço Médio pago por Fornecedor (Menor é melhor)")
-                        
                         st.divider()
-                        
-                        # Gráfico 2: Evolução no Tempo
                         st.markdown("### 📈 Evolução do Preço no Tempo")
                         df_evolucao = df_prod.sort_values(by='data')
                         st.line_chart(df_evolucao, x='data', y='preco_pago')
@@ -1427,16 +1396,14 @@ if df is not None:
                     if df_hist_visual.empty: 
                         df_hist_visual = filtrar_dados_inteligente(df_hist, 'fornecedor', busca_hist_precos)
                 
-                # --- CRIAÇÃO DO MAPA DE CÓDIGOS PARA VISUALIZAÇÃO NA TABELA ---
                 mapa_ean = dict(zip(df['nome do produto'], df['código de barras']))
                 df_hist_visual['código_barras'] = df_hist_visual['produto'].map(mapa_ean)
-                # Reorganiza colunas
+                
                 cols = ['data', 'código_barras', 'produto', 'fornecedor', 'qtd', 'preco_sem_desconto', 'desconto_total_money', 'preco_pago', 'total_gasto', 'obs_importacao']
                 cols = [c for c in cols if c in df_hist_visual.columns]
                 df_hist_visual = df_hist_visual[cols]
-                # ----------------------------------------------------
-
-                st.info("✅ Você pode editar ou **excluir** linhas (selecione a linha e aperte Delete no teclado).")
+                
+                st.info("✅ Edite ou exclua (Delete) linhas.")
                 df_editado = st.data_editor(
                     df_hist_visual.sort_values(by='data', ascending=False), 
                     use_container_width=True, 
@@ -1456,7 +1423,7 @@ if df is not None:
                     indices_removidos = list(set(indices_originais) - set(indices_editados))
                     if indices_removidos:
                         df_hist = df_hist.drop(indices_removidos)
-                        st.warning(f"🗑️ {len(indices_removidos)} registros excluídos permanentemente.")
+                        st.warning(f"🗑️ {len(indices_removidos)} registros excluídos.")
                     
                     if 'código_barras' in df_editado.columns:
                         df_editado = df_editado.drop(columns=['código_barras'])
@@ -1473,9 +1440,9 @@ if df is not None:
                                 df_hist.at[idx, 'total_gasto'] = total_liq
                         except: pass
                     salvar_historico(df_hist, prefixo)
-                    st.success("Histórico salvo e sincronizado!")
+                    st.success("Histórico salvo!")
                     st.rerun()
-            else: st.info("Sem histórico de compras.")
+            else: st.info("Sem histórico.")
 
     # 8. ESTOQUE CENTRAL
     elif modo == "🏡 Estoque Central (Casa)":
@@ -1503,7 +1470,7 @@ if df is not None:
                                 st.success("Salvo!")
                                 st.rerun()
                 else:
-                    st.info("✏️ Se precisar corrigir o estoque, edite abaixo e clique em SALVAR.")
+                    st.info("✏️ Edição direta.")
                     busca_central = st.text_input("🔍 Buscar Produto na Casa:", placeholder="Ex: oleo concordia...", key="busca_central")
                     colunas_visiveis = ['código de barras', 'nome do produto', 'qtd_central', 'validade', 'preco_custo', 'ultimo_fornecedor']
                     df_visual = filtrar_dados_inteligente(df, 'nome do produto', busca_central)[colunas_visiveis]
@@ -1514,9 +1481,10 @@ if df is not None:
                         indices_removidos = list(set(indices_originais) - set(indices_editados))
                         if indices_removidos:
                             df = df.drop(indices_removidos)
-                            st.warning(f"{len(indices_removidos)} itens removidos permanentemente.")
+                            st.warning(f"{len(indices_removidos)} itens removidos.")
                         df.update(df_editado)
                         salvar_estoque(df, prefixo)
+                        
                         bar = st.progress(0)
                         total = len(df_editado)
                         for i, (idx, row) in enumerate(df_editado.iterrows()):
@@ -1528,12 +1496,11 @@ if df is not None:
                             atualizar_casa_global(nome, qtd, custo, None, val, prefixo)
                             bar.progress((i+1)/total)
                         registrar_auditoria(prefixo, "Vários", 0, 0, "Edição Tabela Casa")
-                        st.success("Estoque atualizado e sincronizado em todas as lojas!")
+                        st.success("Estoque atualizado!")
                         st.rerun()
         with tab_gerenciar:
-            st.info("Adicione mercadoria manualmente (ex: compra sem pedido) ou edite dados.")
+            st.info("Adicione mercadoria manualmente.")
             if not df.empty:
-                # --- LISTA VISUAL: COD - NOME ---
                 lista_visuais = (df['código de barras'].astype(str) + " - " + df['nome do produto'].astype(str)).unique().tolist()
                 lista_visuais = sorted(lista_visuais)
                 prod_opcao = st.selectbox("Selecione o Produto:", lista_visuais)
@@ -1551,9 +1518,7 @@ if df is not None:
                             st.markdown(f"### Detalhes do Registro")
                             c_dt, c_hr = st.columns(2)
                             dt_reg = c_dt.date_input("Data da Entrada/Edição:", obter_hora_manaus().date())
-                            # --- CORREÇÃO HORA ---
-                            hr_reg = c_hr.time_input("Hora:", value=obter_hora_manaus().time().replace(second=0, microsecond=0), step=60) # STEP 60
-                            # ---------------------
+                            hr_reg = c_hr.time_input("Hora:", value=obter_hora_manaus().time().replace(second=0, microsecond=0), step=60)
                             
                             c_forn = st.text_input("Fornecedor desta entrada:", value=forn_atual)
                             st.markdown("---")
@@ -1579,7 +1544,7 @@ if df is not None:
                                     df.at[idx_prod, 'qtd_central'] += qtd_input
                                     msg_acao = f"Adicionado +{qtd_input}"
                                     dt_full = datetime.combine(dt_reg, hr_reg)
-                                    hist = {'data': dt_full, 'produto': c_nome.upper().strip(), 'fornecedor': c_forn, 'qtd': qtd_input, 'preco_pago': novo_custo, 'total_gasto': qtd_input * novo_custo}
+                                    hist = {'data': str(dt_full), 'produto': c_nome.upper().strip(), 'fornecedor': c_forn, 'qtd': qtd_input, 'preco_pago': novo_custo, 'total_gasto': qtd_input * novo_custo}
                                     salvar_historico(pd.concat([df_hist, pd.DataFrame([hist])], ignore_index=True), prefixo)
                                     registrar_auditoria(prefixo, c_nome, qtd_antes_audit, df.at[idx_prod, 'qtd_central'], "Entrada Manual Casa")
                                 elif acao.startswith("Substituir"):
@@ -1589,14 +1554,14 @@ if df is not None:
                                 
                                 salvar_estoque(df, prefixo)
                                 atualizar_casa_global(c_nome.upper().strip(), df.at[idx_prod, 'qtd_central'], novo_custo, novo_venda, pd.to_datetime(nova_val) if nova_val else None, prefixo)
-                                st.success(f"✅ {msg_acao} e sincronizado com outras lojas!")
+                                st.success(f"✅ {msg_acao}!")
                                 st.rerun()
 
     # 9. GERAL
     elif modo == "📋 Tabela Geral":
         st.title("📋 Visão Geral (Editável)")
         if not df.empty:
-            st.info("💡 DICA: Se um produto veio com nome errado e sem código: coloque o código correto nele aqui e clique no botão 'CORRIGIR E UNIFICAR' abaixo.")
+            st.info("💡 Botão 'CORRIGIR E UNIFICAR' abaixo ajuda a remover duplicados.")
             busca_geral = st.text_input("🔍 Buscar na Tabela Geral:", placeholder="Ex: oleo concordia...", key="busca_geral")
             df_visual_geral = filtrar_dados_inteligente(df, 'nome do produto', busca_geral)
             df_edit = st.data_editor(df_visual_geral, use_container_width=True, num_rows="dynamic", key="geral_editor")
@@ -1608,9 +1573,10 @@ if df is not None:
                     indices_removidos = list(set(indices_originais) - set(indices_editados))
                     if indices_removidos:
                         df = df.drop(indices_removidos)
-                        st.warning(f"🗑️ {len(indices_removidos)} produtos excluídos permanentemente.")
+                        st.warning(f"🗑️ {len(indices_removidos)} produtos excluídos.")
                     df.update(df_edit)
                     salvar_estoque(df, prefixo)
+                    
                     bar = st.progress(0)
                     total = len(df_edit)
                     for i, (idx, row) in enumerate(df_edit.iterrows()):
@@ -1622,7 +1588,7 @@ if df is not None:
                         atualizar_casa_global(nome, qtd, custo, venda, val, prefixo)
                         bar.progress((i+1)/total)
                     registrar_auditoria(prefixo, "Vários", 0, 0, "Edição Tabela Geral")
-                    st.success("Tabela Geral atualizada e sincronizada!")
+                    st.success("Tabela Geral atualizada!")
                     st.rerun()
             with c2:
                 if st.button("🔮 CORRIGIR NOMES E UNIFICAR (Pelo Código)"):
@@ -1631,6 +1597,6 @@ if df is not None:
                     df = unificar_produtos_por_codigo(df)
                     qtd_depois = len(df)
                     salvar_estoque(df, prefixo)
-                    st.success(f"✅ Mágica feita! {qtd_antes - qtd_depois} produtos duplicados foram unidos e os nomes corrigidos.")
+                    st.success(f"✅ Mágica feita! {qtd_antes - qtd_depois} duplicados unidos.")
                     st.balloons()
                     st.rerun()
