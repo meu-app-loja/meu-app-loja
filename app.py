@@ -5,7 +5,7 @@ import os
 import xml.etree.ElementTree as ET
 import unicodedata
 from io import BytesIO
-import zipfile # Adicionado para o Backup
+import zipfile
 
 # Configuração da página
 st.set_page_config(page_title="Gestão Multi-Lojas", layout="wide", page_icon="🏪")
@@ -131,11 +131,10 @@ if loja_atual == "Loja 1 (Principal)": prefixo = "loja1"
 elif loja_atual == "Loja 2 (Filial)": prefixo = "loja2"
 else: prefixo = "loja3"
 
-# --- FUNÇÃO DE BACKUP (NOVA) ---
+# --- FUNÇÃO DE BACKUP ---
 def gerar_backup_zip():
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        # Lista todos os arquivos xlsx e csv do diretório atual
         for root, dirs, files in os.walk("."):
             for file in files:
                 if file.endswith(".xlsx") or file.endswith(".csv"):
@@ -583,7 +582,7 @@ if df is not None:
     # 1.5 MÓDULO: TRANSFERÊNCIA VIA PICKLIST
     elif modo == "🚚 Transferência em Massa (Picklist)":
         st.title(f"🚚 Transferência em Massa - {loja_atual}")
-        st.markdown("**Sistema Shoppbud/Transferência:** Suba os arquivos Excel para mover estoque da Casa para a Loja.")
+        st.markdown("**Sistema Shoppbud/Transferência:** Suba o Excel para mover estoque da Casa para a Loja.")
         
         # MODO MANUAL DE SELEÇÃO DE COLUNAS (PARA EVITAR ERRO DE NOME)
         # ATUALIZAÇÃO: AGORA ACEITA MÚLTIPLOS ARQUIVOS
@@ -1274,7 +1273,8 @@ if df is not None:
                         if row['qtd.estoque'] <= 0: cor_borda = "red"
                         elif row['qtd.estoque'] < row['qtd_minima']: cor_borda = "orange"
                         with st.container(border=True):
-                            st.subheader(row['nome do produto'])
+                            # --- CORREÇÃO SOLICITADA (BARCODE + NOME) ---
+                            st.subheader(f"{row['código de barras']} - {row['nome do produto']}")
                             c1, c2 = st.columns(2)
                             c1.metric("🏪 Loja", int(row['qtd.estoque']))
                             c2.metric("🏡 Casa", int(row['qtd_central']))
@@ -1634,4 +1634,3 @@ if df is not None:
                     st.success(f"✅ Mágica feita! {qtd_antes - qtd_depois} produtos duplicados foram unidos e os nomes corrigidos.")
                     st.balloons()
                     st.rerun()
-
