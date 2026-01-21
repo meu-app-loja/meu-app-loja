@@ -10,14 +10,15 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # Configuração da página
-st.set_page_config(page_title="Gestão Multi-Lojas (Nuvem)", layout="wide", page_icon="☁️")
+st.set_page_config(page_title="Gestão Multi-Lojas", layout="wide", page_icon="🏪")
 
 # ==============================================================================
-# 🔐 CONEXÃO COM GOOGLE SHEETS (COM MEMÓRIA CACHE PARA NÃO BLOQUEAR)
+# 🔐 CONEXÃO COM GOOGLE SHEETS & CACHE (SOLUÇÃO DOS ERROS)
 # ==============================================================================
-# Cache de conexão: Conecta só uma vez e reaproveita
+
+# Conecta apenas uma vez para não estourar a cota
 @st.cache_resource
-def get_conection():
+def get_connection():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_dict = dict(st.secrets["gcp_service_account"])
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -25,55 +26,31 @@ def get_conection():
     return client.open("Sistema_Estoque_Database")
 
 try:
-    conn = get_conection()
+    conn = get_connection()
 except Exception as e:
-    st.error(f"Erro crítico de conexão: {e}")
+    st.error(f"Erro de conexão: {e}")
     st.stop()
 
-# ==============================================================================
-# 🔄 LEITURA E ESCRITA INTELIGENTE (RESOLVE ERRO 429 E VÍRGULA)
-# ==============================================================================
-
-def inicializar_arquivos(prefixo):
-    # Lista de abas e colunas
-    arquivos = {
-        f"{prefixo}_estoque": ['código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central', 'qtd_minima', 'validade', 'status_compra', 'qtd_comprada', 'preco_custo', 'preco_venda', 'categoria', 'ultimo_fornecedor', 'preco_sem_desconto'],
-        f"{prefixo}_historico_compras": ['data', 'produto', 'fornecedor', 'qtd', 'preco_pago', 'total_gasto', 'numero_nota', 'desconto_total_money', 'preco_sem_desconto', 'obs_importacao'],
-        f"{prefixo}_movimentacoes": ['data_hora', 'produto', 'qtd_movida'],
-        f"{prefixo}_vendas": ['data_hora', 'produto', 'qtd_vendida', 'estoque_restante'],
-        f"{prefixo}_lista_compras": ['produto', 'código_barras', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status'],
-        f"{prefixo}_log_auditoria": ['data_hora', 'produto', 'qtd_antes', 'qtd_nova', 'acao', 'motivo'],
-        f"{prefixo}_ids_vendas": ['id_transacao'],
-        "meus_produtos_oficiais": ['nome do produto', 'código de barras']
-    }
-    
-    # Verifica abas existentes na memória para não bater na API sem necessidade
-    try:
-        abas_existentes = [ws.title for ws in conn.worksheets()]
-        for nome_aba, colunas in arquivos.items():
-            if nome_aba not in abas_existentes:
-                ws = conn.add_worksheet(title=nome_aba, rows=1000, cols=20)
-                ws.append_row(colunas)
-    except: pass
-
-# CACHE DE DADOS: Lê do Google e guarda na memória por 5 min (TTL)
-# Se você salvar algo, limpamos esse cache para atualizar na hora.
-@st.cache_data(ttl=300)
+# Função MESTRA de leitura (Resolve o Erro 429 e a Vírgula)
+@st.cache_data(ttl=600) # Guarda na memória por 10 min ou até salvar
 def ler_aba_nuvem(nome_aba):
     try:
         ws = conn.worksheet(nome_aba)
         dados = ws.get_all_records()
         df = pd.DataFrame(dados)
         
-        # Padroniza colunas
+        # Padroniza colunas (mantendo sua lógica original)
         df.columns = df.columns.str.strip().str.lower()
         
-        # CORREÇÃO DA VÍRGULA (CRUCIAL):
-        # Procura colunas de preço e converte "1,39" para 1.39
-        cols_moeda = ['preco_custo', 'preco_venda', 'preco_sem_desconto', 'preco_pago', 'total_gasto', 'desconto_total_money', 'custo_previsto']
+        # --- VACINA PARA PREÇOS (VÍRGULA -> PONTO) ---
+        # Lista de colunas que PRECISAM ser números
+        cols_moeda = ['preco_custo', 'preco_venda', 'preco_sem_desconto', 'preco_pago', 'total_gasto', 'desconto_total_money', 'custo_previsto', 'qtd', 'qtd.estoque', 'qtd_central']
+        
         for col in cols_moeda:
             if col in df.columns:
-                # Transforma em string, troca vírgula por ponto, converte para numero
+                # 1. Converte para string
+                # 2. Troca vírgula por ponto
+                # 3. Converte para número (se der erro, vira 0.0)
                 df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
                 
@@ -81,40 +58,35 @@ def ler_aba_nuvem(nome_aba):
     except:
         return pd.DataFrame()
 
+# Função MESTRA de salvamento
 def salvar_aba_nuvem(nome_aba, df):
     try:
         ws = conn.worksheet(nome_aba)
         ws.clear()
         
-        # Prepara dados para salvar
+        # Prepara dados (Datas viram texto para não quebrar JSON)
         df_save = df.copy()
-        
-        # Formata datas como texto para não quebrar o JSON
         for col in df_save.columns:
             if pd.api.types.is_datetime64_any_dtype(df_save[col]):
                 df_save[col] = df_save[col].astype(str).replace('NaT', '')
+            df_save[col] = df_save[col].fillna('') # Remove vazios
             
-            # (Opcional) Poderíamos forçar a volta da vírgula aqui, mas o Google Sheets
-            # geralmente entende ponto se a configuração estiver certa. 
-            # Vamos mandar ponto (padrão universal) para garantir a matemática.
-            
-        # Substitui NaNs por vazio
-        df_save = df_save.fillna('')
-        
         ws.update([df_save.columns.values.tolist()] + df_save.values.tolist())
         
-        # LIMPA O CACHE PARA VER A MUDANÇA IMEDIATAMENTE
+        # Limpa o cache para o usuário ver a mudança na hora
         ler_aba_nuvem.clear()
-        
     except Exception as e:
-        st.error(f"Erro ao salvar {nome_aba}: {e}")
+        st.error(f"Erro ao salvar na nuvem: {e}")
 
 # ==============================================================================
-# 🕒 ESTRUTURA ORIGINAL (MANTIDA INTACTA)
+# 🕒 AJUSTE DE FUSO HORÁRIO
 # ==============================================================================
 def obter_hora_manaus():
     return datetime.utcnow() - timedelta(hours=4)
 
+# ==============================================================================
+# 🆕 FUNÇÕES DE LIMPEZA E PADRONIZAÇÃO (SEU CÓDIGO ORIGINAL)
+# ==============================================================================
 def normalizar_texto(texto):
     if not isinstance(texto, str):
         return str(texto) if pd.notnull(texto) else ""
@@ -202,6 +174,7 @@ def processar_excel_oficial(arquivo_subido):
         df_limpo['nome do produto'] = df_limpo['nome do produto'].apply(normalizar_texto)
         df_limpo['código de barras'] = df_limpo['código de barras'].astype(str).str.replace('.0', '', regex=False).str.strip()
         
+        # Salva na nuvem
         salvar_aba_nuvem("meus_produtos_oficiais", df_limpo)
         return True
     except Exception as e:
@@ -209,6 +182,7 @@ def processar_excel_oficial(arquivo_subido):
         return False
 
 def carregar_base_oficial():
+    # Lê da nuvem
     return ler_aba_nuvem("meus_produtos_oficiais")
 
 # ==============================================================================
@@ -225,7 +199,7 @@ if loja_atual == "Loja 1 (Principal)": prefixo = "loja1"
 elif loja_atual == "Loja 2 (Filial)": prefixo = "loja2"
 else: prefixo = "loja3"
 
-# --- BACKUP NUVEM ---
+# --- FUNÇÃO DE BACKUP NUVEM (ADAPTADA) ---
 def gerar_backup_zip_nuvem(dados_dict):
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
@@ -259,6 +233,7 @@ def registrar_auditoria(prefixo, produto, qtd_antes, qtd_nova, acao, motivo="Man
             'acao': acao,
             'motivo': motivo
         }
+        # Inserção direta sem limpar a aba (Append)
         ws = conn.worksheet(nome_aba)
         ws.append_row(list(novo_log.values()))
     except Exception as e:
@@ -274,19 +249,18 @@ def carregar_ids_processados(prefixo):
 def salvar_ids_processados(prefixo, novos_ids):
     if not novos_ids: return
     nome_aba = f"{prefixo}_ids_vendas"
-    ws = conn.worksheet(nome_aba)
-    linhas = [[str(i)] for i in novos_ids]
-    ws.append_rows(linhas)
+    try:
+        ws = conn.worksheet(nome_aba)
+        linhas = [[str(i)] for i in novos_ids]
+        ws.append_rows(linhas)
+    except: pass
 
 def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, nova_validade, prefixo_ignorar):
     todas_lojas = ["loja1", "loja2", "loja3"]
     for loja in todas_lojas:
         if loja == prefixo_ignorar: continue
-        # Carrega da nuvem (com cache ou não)
-        # Nota: Idealmente para consistencia, forçamos leitura, mas aqui confiamos no fluxo
-        # Para ser mais robusto, poderiamos nao usar cache aqui, mas para economizar cota, usamos.
-        df_outra = ler_aba_nuvem(f"{loja}_estoque")
         
+        df_outra = ler_aba_nuvem(f"{loja}_estoque")
         if not df_outra.empty:
             try:
                 mask = df_outra['nome do produto'].astype(str) == str(nome_produto)
@@ -302,27 +276,58 @@ def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, n
                     registrar_auditoria(loja, nome_produto, qtd_antiga, qtd_nova_casa, "Sincronização Automática", f"Origem: {prefixo_ignorar}")
             except Exception: pass
 
-# --- WRAPPERS ---
+# --- ARQUIVOS / ABAS ---
+def inicializar_arquivos(prefixo):
+    # Lista de abas necessárias
+    arquivos = {
+        f"{prefixo}_estoque": ['código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central', 'qtd_minima', 'validade', 'status_compra', 'qtd_comprada', 'preco_custo', 'preco_venda', 'categoria', 'ultimo_fornecedor', 'preco_sem_desconto'],
+        f"{prefixo}_historico_compras": ['data', 'produto', 'fornecedor', 'qtd', 'preco_pago', 'total_gasto', 'numero_nota', 'desconto_total_money', 'preco_sem_desconto', 'obs_importacao'],
+        f"{prefixo}_movimentacoes": ['data_hora', 'produto', 'qtd_movida'],
+        f"{prefixo}_vendas": ['data_hora', 'produto', 'qtd_vendida', 'estoque_restante'],
+        f"{prefixo}_lista_compras": ['produto', 'código_barras', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status'],
+        f"{prefixo}_log_auditoria": ['data_hora', 'produto', 'qtd_antes', 'qtd_nova', 'acao', 'motivo'],
+        f"{prefixo}_ids_vendas": ['id_transacao'],
+        "meus_produtos_oficiais": ['nome do produto', 'código de barras']
+    }
+    # Tenta criar se não existir (sem travar)
+    try:
+        abas_existentes = [ws.title for ws in conn.worksheets()]
+        for nome_aba, colunas in arquivos.items():
+            if nome_aba not in abas_existentes:
+                ws = conn.add_worksheet(title=nome_aba, rows=1000, cols=20)
+                ws.append_row(colunas)
+    except: pass
+
+# --- WRAPPERS DE LEITURA (MANTENDO A LÓGICA DO SEU CÓDIGO) ---
 def carregar_dados(prefixo):
     df = ler_aba_nuvem(f"{prefixo}_estoque")
-    # Reforça tipos numéricos após leitura
+    # Aplica as correções de tipo originais + ajuste de código de barras
     if not df.empty:
-        cols_num = ['qtd.estoque', 'qtd_central', 'qtd_minima', 'qtd_comprada']
-        for col in cols_num:
-            if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-        
+        if 'preco_sem_desconto' not in df.columns: df['preco_sem_desconto'] = 0.0
+        # A conversão de moeda já foi feita no ler_aba_nuvem, aqui reforçamos int e datas
+        df['ultimo_fornecedor'] = df['ultimo_fornecedor'].fillna('')
         if 'código de barras' in df.columns:
             df['código de barras'] = df['código de barras'].astype(str).str.replace('.0', '').str.strip()
-        
         if 'validade' in df.columns:
-            df['validade'] = pd.to_datetime(df['validade'], errors='coerce')
-            
+            df['validade'] = pd.to_datetime(df['validade'], dayfirst=True, errors='coerce')
     return df
 
 def carregar_historico(prefixo):
     df_h = ler_aba_nuvem(f"{prefixo}_historico_compras")
     if not df_h.empty:
         df_h['data'] = pd.to_datetime(df_h['data'], errors='coerce')
+        # Lógica original de cálculo retroativo
+        if 'desconto_total_money' not in df_h.columns:
+            if 'desconto_obtido' in df_h.columns: df_h['desconto_total_money'] = df_h['desconto_obtido'] * df_h['qtd']
+            else: df_h['desconto_total_money'] = 0.0
+        if 'preco_sem_desconto' not in df_h.columns: df_h['preco_sem_desconto'] = 0.0
+        
+        # Garante floats limpos
+        df_h['preco_sem_desconto'] = pd.to_numeric(df_h['preco_sem_desconto'], errors='coerce').fillna(0.0)
+        df_h['preco_pago'] = pd.to_numeric(df_h['preco_pago'], errors='coerce').fillna(0.0)
+        
+        mask_zerado = (df_h['preco_sem_desconto'] == 0) & (df_h['preco_pago'] > 0)
+        df_h.loc[mask_zerado, 'preco_sem_desconto'] = df_h.loc[mask_zerado, 'preco_pago']
     return df_h
 
 def carregar_movimentacoes(prefixo):
@@ -338,8 +343,12 @@ def carregar_vendas(prefixo):
     return df_v
 
 def carregar_lista_compras(prefixo):
-    return ler_aba_nuvem(f"{prefixo}_lista_compras")
+    df = ler_aba_nuvem(f"{prefixo}_lista_compras")
+    if not df.empty and 'código_barras' not in df.columns: 
+        df['código_barras'] = ""
+    return df
 
+# Wrappers de salvamento
 def salvar_estoque(df, prefixo): salvar_aba_nuvem(f"{prefixo}_estoque", df)
 def salvar_historico(df, prefixo): salvar_aba_nuvem(f"{prefixo}_historico_compras", df)
 def salvar_movimentacoes(df, prefixo): salvar_aba_nuvem(f"{prefixo}_movimentacoes", df)
@@ -347,7 +356,7 @@ def salvar_vendas(df, prefixo): salvar_aba_nuvem(f"{prefixo}_vendas", df)
 def salvar_lista_compras(df, prefixo): salvar_aba_nuvem(f"{prefixo}_lista_compras", df)
 
 # ==============================================================================
-# 🚀 APP
+# 🚀 INÍCIO DO APP (SEU CÓDIGO ORIGINAL - REGRAS DE OURO MANTIDAS)
 # ==============================================================================
 
 inicializar_arquivos(prefixo)
@@ -446,6 +455,7 @@ if df is not None:
     elif modo == "⚖️ Conciliação (Shoppbud vs App)":
         st.title("⚖️ Conciliação de Estoque")
         st.markdown("**Ferramenta de Auditoria:** Compare o estoque do seu App com o Planograma do Shoppbud.")
+        
         arq_planograma = st.file_uploader("📂 Carregar Planograma Shoppbud (.xlsx)", type=['xlsx'])
         if arq_planograma:
             try:
@@ -494,8 +504,8 @@ if df is not None:
                                 with pd.ExcelWriter(buffer) as writer:
                                     pd.DataFrame({'Código de Barras': df_export['código normalizado'], 'Quantidade': df_export['qtd.estoque']}).to_excel(writer, index=False)
                                 st.download_button(label="📥 BAIXAR EXCEL PARA SHOPPBUD (Direita)", data=buffer.getvalue(), file_name="ajuste_shoppbud.xlsx", mime="application/vnd.ms-excel")
-                else: st.error("Colunas não encontradas no arquivo.")
-            except Exception as e: st.error(f"Erro ao ler arquivo: {e}")
+                else: st.error("Colunas não encontradas.")
+            except Exception as e: st.error(f"Erro: {e}")
 
     # 1.5 PICKLIST
     elif modo == "🚚 Transferência em Massa (Picklist)":
@@ -568,6 +578,19 @@ if df is not None:
                     salvar_lista_compras(df_lista_compras, prefixo)
                     st.success("Lista gerada!")
                     st.rerun()
+            st.divider()
+            with st.form("add_manual_lista"):
+                lista_visuais = sorted((df['código de barras'].astype(str) + " - " + df['nome do produto'].astype(str)).unique().tolist())
+                prod_man = st.selectbox("Produto:", [""]+lista_visuais)
+                q_man = st.number_input("Qtd:", min_value=1)
+                if st.form_submit_button("Adicionar"):
+                    if prod_man:
+                        nm = prod_man.split(' - ', 1)[1]
+                        novo = {'produto': nm, 'código_barras': prod_man.split(' - ', 0), 'qtd_sugerida': q_man, 'status': 'Manual', 'data_inclusao': str(obter_hora_manaus())}
+                        df_lista_compras = pd.concat([df_lista_compras, pd.DataFrame([novo])], ignore_index=True)
+                        salvar_lista_compras(df_lista_compras, prefixo)
+                        st.success("Adicionado!")
+                        st.rerun()
 
     # 2. CADASTRAR PRODUTO
     elif modo == "🆕 Cadastrar Produto":
