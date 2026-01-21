@@ -122,6 +122,8 @@ def unificar_produtos_por_codigo(df):
     cols_num = ['qtd.estoque', 'qtd_central', 'qtd_minima', 'qtd_comprada', 'preco_custo', 'preco_venda', 'preco_sem_desconto']
     for col in cols_num:
         if col in df.columns:
+            # Correção de vírgula para ponto antes de converter
+            df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
     lista_final = []
@@ -362,7 +364,10 @@ def carregar_dados(prefixo_arquivo):
         if 'preco_sem_desconto' not in df.columns: df['preco_sem_desconto'] = 0.0
         cols_num = ['qtd.estoque', 'qtd_central', 'qtd_minima', 'qtd_comprada', 'preco_custo', 'preco_venda', 'preco_sem_desconto']
         for col in cols_num:
-            if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            if col in df.columns: 
+                # TRADUÇÃO VÍRGULA -> PONTO
+                df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         df['ultimo_fornecedor'] = df['ultimo_fornecedor'].fillna('')
         df['código de barras'] = df['código de barras'].apply(lambda x: str(x).replace('.0', '').strip() if pd.notnull(x) else "")
         df['nome do produto'] = df['nome do produto'].apply(lambda x: normalizar_texto(str(x)))
@@ -377,7 +382,10 @@ def carregar_historico(prefixo_arquivo):
         df_h['data'] = pd.to_datetime(df_h['data'], errors='coerce')
         cols_num = ['qtd', 'preco_pago', 'total_gasto', 'desconto_total_money', 'preco_sem_desconto']
         for c in cols_num:
-             if c in df_h.columns: df_h[c] = pd.to_numeric(df_h[c], errors='coerce').fillna(0)
+             if c in df_h.columns: 
+                 # TRADUÇÃO VÍRGULA -> PONTO
+                 df_h[c] = df_h[c].astype(str).str.replace(',', '.', regex=False)
+                 df_h[c] = pd.to_numeric(df_h[c], errors='coerce').fillna(0)
         if 'numero_nota' not in df_h.columns: df_h['numero_nota'] = ""
         if 'obs_importacao' not in df_h.columns: df_h['obs_importacao'] = ""
         if 'desconto_total_money' not in df_h.columns:
@@ -1135,6 +1143,7 @@ if df is not None:
                     key="editor_historico_geral",
                     num_rows="dynamic", 
                     column_config={
+                        "data": st.column_config.DatetimeColumn("Data/Hora", format="DD/MM/YYYY HH:mm"),
                         "código_barras": st.column_config.TextColumn("Cód. Barras", disabled=True),
                         "preco_sem_desconto": st.column_config.NumberColumn("Preço Tabela", format="R$ %.2f"),
                         "desconto_total_money": st.column_config.NumberColumn("Desconto TOTAL", format="R$ %.2f"),
@@ -1180,7 +1189,7 @@ if df is not None:
                     df_show = filtrar_dados_inteligente(df, 'nome do produto', busca_central)
                     for idx, row in df_show.iterrows():
                         with st.container(border=True):
-                            st.write(f"📝 {row['código de barras']} | **{row['nome do produto']}**")
+                            st.write(f"📝 {row['código_barras']} | **{row['nome do produto']}**")
                             col1, col2 = st.columns(2)
                             nova_qtd = col1.number_input(f"Qtd Casa:", value=int(row['qtd_central']), key=f"q_{idx}")
                             novo_custo = col2.number_input(f"Custo:", value=float(row['preco_custo']), key=f"c_{idx}")
