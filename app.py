@@ -48,7 +48,6 @@ def carregar_do_google(nome_aba):
         df = pd.DataFrame(dados, columns=headers)
         return df
     except Exception as e:
-        # Retorna DataFrame vazio em caso de erro para não quebrar a tela
         return pd.DataFrame()
 
 def salvar_no_google(df, nome_aba):
@@ -695,29 +694,47 @@ if df is not None:
 
     elif modo == "📝 Lista de Compras (Planejamento)":
         st.title("📝 Planejamento de Compras")
-        tab_lista, tab_add = st.tabs(["📋 Ver Lista Atual", "➕ Adicionar Itens"])
+        tab_lista, tab_add = st.tabs(["📋 Ver Lista Atual (Editável)", "➕ Adicionar Itens"])
         with tab_lista:
             if not df_lista_compras.empty:
-                if usar_modo_mobile:
-                    st.markdown("### 🛒 Itens da Lista (Clique para ver Estoque)")
-                    for idx, row in df_lista_compras.iterrows():
-                        dados_estoque = df[df['nome do produto'] == row['produto']]
-                        qtd_loja_atual = int(dados_estoque.iloc[0]['qtd.estoque']) if not dados_estoque.empty else 0
-                        qtd_casa_atual = int(dados_estoque.iloc[0]['qtd_central']) if not dados_estoque.empty else 0
-                        with st.expander(f"🛒 {row['código_barras']} - {row['produto']}"):
-                            c1, c2 = st.columns(2)
-                            c1.metric("Estoque Loja", qtd_loja_atual)
-                            c2.metric("Estoque Casa", qtd_casa_atual)
-                            st.write(f"**Qtd Sugerida:** {int(row['qtd_sugerida'])}")
-                else: st.dataframe(df_lista_compras, use_container_width=True)
-                if st.button("🗑️ Limpar Lista"):
-                    salvar_lista_compras(pd.DataFrame(columns=['produto', 'código_barras', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status']), prefixo)
-                    st.success("Limpa!")
+                # 1. Busca Inteligente
+                busca_lista = st.text_input("🔍 Buscar na Lista:", placeholder="Ex: arroz...")
+                df_lista_show = filtrar_dados_inteligente(df_lista_compras, 'produto', busca_lista)
+
+                # 2. Tabela Editável
+                st.info("💡 Edite quantidades, status ou apague itens (selecione e aperte Delete).")
+                df_edit_lista = st.data_editor(
+                    df_lista_show,
+                    use_container_width=True,
+                    num_rows="dynamic",
+                    key="editor_lista_compras",
+                    column_config={
+                        "status": st.column_config.SelectboxColumn("Status", options=["A Comprar", "Comprado", "Cancelado", "Manual"]),
+                        "qtd_sugerida": st.column_config.NumberColumn("Qtd", min_value=0),
+                        "código_barras": st.column_config.TextColumn("Código", disabled=True),
+                    }
+                )
+
+                # 3. Botão Salvar
+                if st.button("💾 SALVAR ALTERAÇÕES DA LISTA"):
+                    # Lógica para salvar mantendo a integridade mesmo com filtro
+                    indices_originais = df_lista_show.index.tolist()
+                    indices_editados = df_edit_lista.index.tolist()
+                    removidos = list(set(indices_originais) - set(indices_editados))
+                    
+                    if removidos:
+                        df_lista_compras = df_lista_compras.drop(removidos)
+                    
+                    df_lista_compras.update(df_edit_lista)
+                    salvar_lista_compras(df_lista_compras, prefixo)
+                    st.success("Lista atualizada com sucesso!")
                     st.rerun()
-            else: st.info("Lista vazia.")
+            else:
+                st.info("Sua lista de compras está vazia.")
+
         with tab_add:
             st.subheader("🤖 Gerador Automático")
-            if st.button("🚀 Gerar Lista"):
+            if st.button("🚀 Gerar Lista Baseada no Estoque Baixo"):
                 if df.empty: st.warning("Sem produtos.")
                 else:
                     mask_baixo = (df['qtd.estoque'] + df['qtd_central']) <= df['qtd_minima']
@@ -737,23 +754,49 @@ if df is not None:
                             st.rerun()
                         else: st.warning("Itens já na lista.")
             st.divider()
+            
+            st.subheader("✋ Adicionar Manualmente")
             with st.form("add_manual_lista"):
                 lista_visuais = sorted((df['código de barras'].astype(str) + " - " + df['nome do produto'].astype(str)).unique().tolist())
                 prod_man_visual = st.selectbox("Produto:", [""] + lista_visuais)
+                
                 c_qtd, c_forn = st.columns(2)
-                qtd_man = c_qtd.number_input("Qtd:", min_value=1, value=10)
-                obs_man = c_forn.text_input("Obs:", placeholder="Ex: Atacadão")
-                if st.form_submit_button("Adicionar"):
+                qtd_man = c_qtd.number_input("Qtd a Comprar:", min_value=1, value=10)
+                obs_man = c_forn.text_input("Fornecedor (Opcional):", placeholder="Ex: Atacadão")
+                
+                # Campos de Data e Hora Editáveis
+                c_dt, c_hr = st.columns(2)
+                if 'hora_lista_fixa' not in st.session_state:
+                    st.session_state['hora_lista_fixa'] = obter_hora_manaus().time().replace(second=0, microsecond=0)
+                
+                dt_manual = c_dt.date_input("Data da Inclusão:", value=obter_hora_manaus().date())
+                hr_manual = c_hr.time_input("Hora da Inclusão:", value=st.session_state['hora_lista_fixa'], step=60)
+                
+                if st.form_submit_button("Adicionar à Lista"):
                     if prod_man_visual:
                         try:
                             parts = prod_man_visual.split(' - ', 1)
                             cod = parts[0]; nome = parts[1]
                         except: cod = ""; nome = prod_man_visual
-                        novo_item = {'produto': nome, 'código_barras': cod, 'qtd_sugerida': qtd_man, 'fornecedor': obs_man, 'custo_previsto': 0.0, 'data_inclusao': obter_hora_manaus().strftime("%d/%m/%Y %H:%M"), 'status': 'Manual'}
+                        
+                        # Usa a data/hora escolhida pelo usuário
+                        data_final = datetime.combine(dt_manual, hr_manual).strftime("%d/%m/%Y %H:%M")
+                        
+                        novo_item = {
+                            'produto': nome, 
+                            'código_barras': cod, 
+                            'qtd_sugerida': qtd_man, 
+                            'fornecedor': obs_man, 
+                            'custo_previsto': 0.0, 
+                            'data_inclusao': data_final, 
+                            'status': 'Manual'
+                        }
                         df_lista_compras = pd.concat([df_lista_compras, pd.DataFrame([novo_item])], ignore_index=True)
                         salvar_lista_compras(df_lista_compras, prefixo)
                         st.success("Adicionado!")
                         st.rerun()
+                    else:
+                        st.error("Selecione um produto.")
 
     elif modo == "🆕 Cadastrar Produto":
         st.title(f"🆕 Cadastro - {loja_atual}")
