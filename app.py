@@ -365,7 +365,7 @@ def carregar_dados(prefixo_arquivo):
         cols_num = ['qtd.estoque', 'qtd_central', 'qtd_minima', 'qtd_comprada', 'preco_custo', 'preco_venda', 'preco_sem_desconto']
         for col in cols_num:
             if col in df.columns: 
-                # TRADUÇÃO VÍRGULA -> PONTO (Melhoria 4)
+                # TRADUÇÃO VÍRGULA -> PONTO
                 df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         df['ultimo_fornecedor'] = df['ultimo_fornecedor'].fillna('')
@@ -383,7 +383,7 @@ def carregar_historico(prefixo_arquivo):
         cols_num = ['qtd', 'preco_pago', 'total_gasto', 'desconto_total_money', 'preco_sem_desconto']
         for c in cols_num:
              if c in df_h.columns: 
-                 # TRADUÇÃO VÍRGULA -> PONTO (Melhoria 4)
+                 # TRADUÇÃO VÍRGULA -> PONTO
                  df_h[c] = df_h[c].astype(str).str.replace(',', '.', regex=False)
                  df_h[c] = pd.to_numeric(df_h[c], errors='coerce').fillna(0)
         if 'numero_nota' not in df_h.columns: df_h['numero_nota'] = ""
@@ -705,11 +705,15 @@ if df is not None:
         tab_lista, tab_add = st.tabs(["📋 Ver Lista Atual (Editável)", "➕ Adicionar Itens"])
         with tab_lista:
             if not df_lista_compras.empty:
+                # --- CORREÇÃO DE SEGURANÇA: Resetar índice para garantir exclusão correta ---
+                df_lista_compras = df_lista_compras.reset_index(drop=True)
+                
                 # --- MELHORIA 2: Busca e Tabela Editável ---
                 busca_lista = st.text_input("🔍 Buscar na Lista:", placeholder="Ex: arroz...")
                 df_lista_show = filtrar_dados_inteligente(df_lista_compras, 'produto', busca_lista)
 
-                st.info("💡 Edite quantidades, status ou apague itens (selecione e aperte Delete).")
+                st.warning("⚠️ Atenção: Ao excluir ou editar itens na tabela, você DEVE clicar no botão 'SALVAR ALTERAÇÕES' abaixo para gravar.")
+                
                 df_edit_lista = st.data_editor(
                     df_lista_show,
                     use_container_width=True,
