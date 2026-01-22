@@ -52,7 +52,24 @@ def carregar_do_google(nome_aba):
 
 def salvar_no_google(df, nome_aba):
     """Salva o DataFrame na nuvem e limpa o cache para atualizar a tela."""
-    if df.empty: return
+    if df.empty:
+        # Se o DF estiver vazio, precisamos limpar a aba, mas manter o cabeçalho se possível,
+        # ou deixar a função lidar com isso na próxima leitura.
+        # Aqui vamos garantir que a aba seja limpa corretamente.
+        try:
+            st.cache_data.clear()
+            client = conectar_google_sheets()
+            sh = client
+            try:
+                worksheet = sh.worksheet(nome_aba)
+                worksheet.clear() # Limpa tudo
+                # Se tiver colunas definidas, recria o cabeçalho
+                if not df.columns.empty:
+                    worksheet.update([df.columns.tolist()])
+            except: pass
+        except: pass
+        return
+
     try:
         st.cache_data.clear() # Limpa memória para ver os dados novos
         
@@ -728,14 +745,15 @@ if df is not None:
 
                 # 3. Botão Salvar CORRIGIDO
                 if st.button("💾 SALVAR ALTERAÇÕES DA LISTA"):
-                    # Pega os índices do que estava sendo mostrado (filtrado ou não)
-                    indices_visiveis = df_lista_show.index.tolist()
-                    
-                    # Remove essas linhas do DataFrame original
-                    df_lista_compras = df_lista_compras.drop(indices_visiveis, errors='ignore')
-                    
-                    # Adiciona de volta o que sobrou no editor (se o usuário apagou no editor, não volta)
-                    df_lista_compras = pd.concat([df_lista_compras, df_edit_lista], ignore_index=True)
+                    # SE A BUSCA ESTIVER VAZIA (USUÁRIO VENDO TUDO), SALVAMOS EXATAMENTE O QUE ESTÁ NA TELA
+                    # ISSO CORRIGE O ERRO DO PRIMEIRO ITEM NÃO APAGAR, POIS IGNORA ÍNDICES ANTIGOS.
+                    if not busca_lista:
+                        df_lista_compras = df_edit_lista.copy()
+                    else:
+                        # Se estiver filtrando, mantemos a lógica de merge
+                        indices_visiveis = df_lista_show.index.tolist()
+                        df_lista_compras = df_lista_compras.drop(indices_visiveis, errors='ignore')
+                        df_lista_compras = pd.concat([df_lista_compras, df_edit_lista], ignore_index=True)
                     
                     salvar_lista_compras(df_lista_compras, prefixo)
                     st.success("Lista atualizada com sucesso!")
