@@ -50,10 +50,17 @@ def carregar_do_google(nome_aba):
     except Exception as e:
         return pd.DataFrame()
 
-def salvar_no_google(df, nome_aba):
-    """Salva o DataFrame na nuvem e limpa o cache para atualizar a tela."""
-    # --- CORREÇÃO CIRÚRGICA: Removida a trava 'if df.empty: return' ---
-    # Isso permite que, se você apagar todos os itens, o sistema limpe a planilha no Google também.
+def salvar_no_google(df, nome_aba, permitir_vazio=False):
+    """
+    Salva o DataFrame na nuvem e limpa o cache.
+    permitir_vazio=False (Padrão): Protege o Estoque contra apagamento acidental.
+    permitir_vazio=True: Permite limpar a Lista de Compras.
+    """
+    # --- TRAVA DE SEGURANÇA REATIVADA ---
+    # Se a tabela estiver vazia E NÃO tiver permissão explícita, cancela o salvamento.
+    if df.empty and not permitir_vazio: 
+        return
+
     try:
         st.cache_data.clear() # Limpa memória para ver os dados novos
         
@@ -64,13 +71,13 @@ def salvar_no_google(df, nome_aba):
         except gspread.WorksheetNotFound:
             worksheet = sh.add_worksheet(title=nome_aba, rows=1000, cols=20)
         
-        # Se o df estiver vazio, df_limpo terá apenas colunas ou será vazio
         df_limpo = df.fillna("")
         
+        # Prepara os dados. Se vazio, garante lista vazia mas tenta manter cabeçalhos se existirem
         if not df_limpo.empty:
             dados_lista = [df_limpo.columns.tolist()] + df_limpo.astype(str).values.tolist()
         else:
-            # Se estiver vazio, salvamos apenas os cabeçalhos para manter a estrutura
+            # Se permitido vazio, salva apenas o cabeçalho ou limpa tudo
             dados_lista = [df.columns.tolist()] if not df.columns.empty else []
 
         worksheet.clear()
@@ -520,7 +527,8 @@ def salvar_estoque(df, prefixo): salvar_no_google(df, f"{prefixo}_estoque")
 def salvar_historico(df, prefixo): salvar_no_google(df, f"{prefixo}_historico_compras")
 def salvar_movimentacoes(df, prefixo): salvar_no_google(df, f"{prefixo}_movimentacoes")
 def salvar_vendas(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas")
-def salvar_lista_compras(df, prefixo): salvar_no_google(df, f"{prefixo}_lista_compras")
+# --- CORREÇÃO CIRÚRGICA: Esta função agora envia a "Senha" (permitir_vazio=True) ---
+def salvar_lista_compras(df, prefixo): salvar_no_google(df, f"{prefixo}_lista_compras", permitir_vazio=True)
 
 # ==============================================================================
 # 🚀 INÍCIO DO APP
@@ -736,15 +744,21 @@ if df is not None:
 
                 # 3. Botão Salvar
                 if st.button("💾 SALVAR ALTERAÇÕES DA LISTA"):
-                    # Lógica para salvar mantendo a integridade mesmo com filtro
-                    indices_originais = df_lista_show.index.tolist()
-                    indices_editados = df_edit_lista.index.tolist()
-                    removidos = list(set(indices_originais) - set(indices_editados))
+                    # Se não houver busca (estiver vendo tudo), substituímos a lista inteira pelo que está na tela.
+                    # Isso resolve o problema de índices que não apagam a primeira linha.
+                    if not busca_lista:
+                        df_lista_compras = df_edit_lista.copy()
+                    else:
+                        # Se tiver busca, mantemos a lógica de apagar apenas o que sumiu do filtro
+                        indices_originais = df_lista_show.index.tolist()
+                        indices_editados = df_edit_lista.index.tolist()
+                        removidos = list(set(indices_originais) - set(indices_editados))
+                        
+                        if removidos:
+                            df_lista_compras = df_lista_compras.drop(removidos)
+                        
+                        df_lista_compras.update(df_edit_lista)
                     
-                    if removidos:
-                        df_lista_compras = df_lista_compras.drop(removidos)
-                    
-                    df_lista_compras.update(df_edit_lista)
                     salvar_lista_compras(df_lista_compras, prefixo)
                     st.success("Lista atualizada com sucesso!")
                     st.rerun()
