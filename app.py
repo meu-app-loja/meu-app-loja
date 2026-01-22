@@ -365,7 +365,7 @@ def carregar_dados(prefixo_arquivo):
         cols_num = ['qtd.estoque', 'qtd_central', 'qtd_minima', 'qtd_comprada', 'preco_custo', 'preco_venda', 'preco_sem_desconto']
         for col in cols_num:
             if col in df.columns: 
-                # TRADUÇÃO VÍRGULA -> PONTO
+                # TRADUÇÃO VÍRGULA -> PONTO (Melhoria 4)
                 df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         df['ultimo_fornecedor'] = df['ultimo_fornecedor'].fillna('')
@@ -383,7 +383,7 @@ def carregar_historico(prefixo_arquivo):
         cols_num = ['qtd', 'preco_pago', 'total_gasto', 'desconto_total_money', 'preco_sem_desconto']
         for c in cols_num:
              if c in df_h.columns: 
-                 # TRADUÇÃO VÍRGULA -> PONTO
+                 # TRADUÇÃO VÍRGULA -> PONTO (Melhoria 4)
                  df_h[c] = df_h[c].astype(str).str.replace(',', '.', regex=False)
                  df_h[c] = pd.to_numeric(df_h[c], errors='coerce').fillna(0)
         if 'numero_nota' not in df_h.columns: df_h['numero_nota'] = ""
@@ -705,7 +705,7 @@ if df is not None:
         tab_lista, tab_add = st.tabs(["📋 Ver Lista Atual (Editável)", "➕ Adicionar Itens"])
         with tab_lista:
             if not df_lista_compras.empty:
-                # --- MELHORIA 1: Busca e Tabela Editável ---
+                # --- MELHORIA 2: Busca e Tabela Editável ---
                 busca_lista = st.text_input("🔍 Buscar na Lista:", placeholder="Ex: arroz...")
                 df_lista_show = filtrar_dados_inteligente(df_lista_compras, 'produto', busca_lista)
 
@@ -722,6 +722,7 @@ if df is not None:
                     }
                 )
 
+                # 3. Botão Salvar
                 if st.button("💾 SALVAR ALTERAÇÕES DA LISTA"):
                     # Lógica para salvar mantendo a integridade mesmo com filtro
                     indices_originais = df_lista_show.index.tolist()
@@ -762,22 +763,22 @@ if df is not None:
             st.divider()
             
             st.subheader("✋ Adicionar Manualmente")
-            with st.form("add_manual_lista"):
-                lista_visuais = sorted((df['código de barras'].astype(str) + " - " + df['nome do produto'].astype(str)).unique().tolist())
-                prod_man_visual = st.selectbox("Produto:", [""] + lista_visuais)
-                
-                # --- MELHORIA 2: Mostrar estoque ao selecionar ---
-                if prod_man_visual:
-                    try:
-                        parts = prod_man_visual.split(' - ', 1)
-                        cod_sel = parts[0]
-                        mask_sel = df['código de barras'] == cod_sel
-                        if mask_sel.any():
-                            q_loja = int(df.loc[mask_sel, 'qtd.estoque'].values[0])
-                            q_casa = int(df.loc[mask_sel, 'qtd_central'].values[0])
-                            st.info(f"ℹ️ Posição Atual: 📦 Loja: {q_loja} | 🏡 Casa: {q_casa}")
-                    except: pass
+            # --- MELHORIA 1: Mover o selectbox para FORA do formulário ---
+            lista_visuais = sorted((df['código de barras'].astype(str) + " - " + df['nome do produto'].astype(str)).unique().tolist())
+            prod_man_visual = st.selectbox("Produto:", [""] + lista_visuais, key="sel_prod_lista")
+            
+            if prod_man_visual:
+                try:
+                    parts = prod_man_visual.split(' - ', 1)
+                    cod_sel = parts[0]
+                    mask_sel = df['código de barras'] == cod_sel
+                    if mask_sel.any():
+                        q_loja = int(df.loc[mask_sel, 'qtd.estoque'].values[0])
+                        q_casa = int(df.loc[mask_sel, 'qtd_central'].values[0])
+                        st.info(f"ℹ️ Posição Atual: 📦 Loja: {q_loja} | 🏡 Casa: {q_casa}")
+                except: pass
 
+            with st.form("add_manual_lista"):
                 c_qtd, c_forn = st.columns(2)
                 qtd_man = c_qtd.number_input("Qtd a Comprar:", min_value=1, value=10)
                 obs_man = c_forn.text_input("Fornecedor (Opcional):", placeholder="Ex: Atacadão")
