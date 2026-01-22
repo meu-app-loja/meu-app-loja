@@ -728,13 +728,13 @@ if df is not None:
 
                 # 3. Botão Salvar
                 if st.button("💾 SALVAR ALTERAÇÕES DA LISTA"):
-                    # CORREÇÃO CIRÚRGICA AQUI
-                    # Se não houver busca (estiver vendo tudo), substituímos a lista inteira pelo que está na tela.
-                    # Isso resolve o problema de índices que não apagam a primeira linha.
+                    # --- CORREÇÃO CIRÚRGICA: Lógica de Salvamento ---
                     if not busca_lista:
+                        # Se não tem busca (vendo tudo), a tela é a verdade absoluta.
+                        # Substitui tudo (resolve o problema da linha 0 não apagar).
                         df_lista_compras = df_edit_lista.copy()
                     else:
-                        # Se tiver busca, mantemos a lógica de apagar apenas o que sumiu do filtro
+                        # Se tem busca, mantém a lógica de apagar só o que sumiu do filtro.
                         indices_originais = df_lista_show.index.tolist()
                         indices_editados = df_edit_lista.index.tolist()
                         removidos = list(set(indices_originais) - set(indices_editados))
