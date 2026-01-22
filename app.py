@@ -52,7 +52,8 @@ def carregar_do_google(nome_aba):
 
 def salvar_no_google(df, nome_aba):
     """Salva o DataFrame na nuvem e limpa o cache para atualizar a tela."""
-    if df.empty: return
+    # --- CORREÇÃO CIRÚRGICA: Removida a trava 'if df.empty: return' ---
+    # Isso permite que, se você apagar todos os itens, o sistema limpe a planilha no Google também.
     try:
         st.cache_data.clear() # Limpa memória para ver os dados novos
         
@@ -63,11 +64,18 @@ def salvar_no_google(df, nome_aba):
         except gspread.WorksheetNotFound:
             worksheet = sh.add_worksheet(title=nome_aba, rows=1000, cols=20)
         
+        # Se o df estiver vazio, df_limpo terá apenas colunas ou será vazio
         df_limpo = df.fillna("")
-        dados_lista = [df_limpo.columns.tolist()] + df_limpo.astype(str).values.tolist()
         
+        if not df_limpo.empty:
+            dados_lista = [df_limpo.columns.tolist()] + df_limpo.astype(str).values.tolist()
+        else:
+            # Se estiver vazio, salvamos apenas os cabeçalhos para manter a estrutura
+            dados_lista = [df.columns.tolist()] if not df.columns.empty else []
+
         worksheet.clear()
-        worksheet.update(dados_lista)
+        if dados_lista:
+            worksheet.update(dados_lista)
         
     except Exception as e:
         st.error(f"ERRO DE CONEXÃO AO SALVAR ({nome_aba}): {e}. Tente novamente em alguns segundos.")
@@ -728,22 +736,15 @@ if df is not None:
 
                 # 3. Botão Salvar
                 if st.button("💾 SALVAR ALTERAÇÕES DA LISTA"):
-                    # --- CORREÇÃO CIRÚRGICA: Lógica de Salvamento ---
-                    if not busca_lista:
-                        # Se não tem busca (vendo tudo), a tela é a verdade absoluta.
-                        # Substitui tudo (resolve o problema da linha 0 não apagar).
-                        df_lista_compras = df_edit_lista.copy()
-                    else:
-                        # Se tem busca, mantém a lógica de apagar só o que sumiu do filtro.
-                        indices_originais = df_lista_show.index.tolist()
-                        indices_editados = df_edit_lista.index.tolist()
-                        removidos = list(set(indices_originais) - set(indices_editados))
-                        
-                        if removidos:
-                            df_lista_compras = df_lista_compras.drop(removidos)
-                        
-                        df_lista_compras.update(df_edit_lista)
+                    # Lógica para salvar mantendo a integridade mesmo com filtro
+                    indices_originais = df_lista_show.index.tolist()
+                    indices_editados = df_edit_lista.index.tolist()
+                    removidos = list(set(indices_originais) - set(indices_editados))
                     
+                    if removidos:
+                        df_lista_compras = df_lista_compras.drop(removidos)
+                    
+                    df_lista_compras.update(df_edit_lista)
                     salvar_lista_compras(df_lista_compras, prefixo)
                     st.success("Lista atualizada com sucesso!")
                     st.rerun()
