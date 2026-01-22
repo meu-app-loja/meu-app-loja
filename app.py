@@ -728,15 +728,22 @@ if df is not None:
 
                 # 3. Botão Salvar
                 if st.button("💾 SALVAR ALTERAÇÕES DA LISTA"):
-                    # Lógica para salvar mantendo a integridade mesmo com filtro
-                    indices_originais = df_lista_show.index.tolist()
-                    indices_editados = df_edit_lista.index.tolist()
-                    removidos = list(set(indices_originais) - set(indices_editados))
+                    # CORREÇÃO CIRÚRGICA AQUI
+                    # Se não houver busca (estiver vendo tudo), substituímos a lista inteira pelo que está na tela.
+                    # Isso resolve o problema de índices que não apagam a primeira linha.
+                    if not busca_lista:
+                        df_lista_compras = df_edit_lista.copy()
+                    else:
+                        # Se tiver busca, mantemos a lógica de apagar apenas o que sumiu do filtro
+                        indices_originais = df_lista_show.index.tolist()
+                        indices_editados = df_edit_lista.index.tolist()
+                        removidos = list(set(indices_originais) - set(indices_editados))
+                        
+                        if removidos:
+                            df_lista_compras = df_lista_compras.drop(removidos)
+                        
+                        df_lista_compras.update(df_edit_lista)
                     
-                    if removidos:
-                        df_lista_compras = df_lista_compras.drop(removidos)
-                    
-                    df_lista_compras.update(df_edit_lista)
                     salvar_lista_compras(df_lista_compras, prefixo)
                     st.success("Lista atualizada com sucesso!")
                     st.rerun()
@@ -1354,4 +1361,3 @@ if df is not None:
                     st.success(f"✅ Mágica feita! {qtd_antes - qtd_depois} duplicados unidos.")
                     st.balloons()
                     st.rerun()
-
