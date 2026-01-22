@@ -726,17 +726,17 @@ if df is not None:
                     }
                 )
 
-                # 3. Botão Salvar
+                # 3. Botão Salvar CORRIGIDO
                 if st.button("💾 SALVAR ALTERAÇÕES DA LISTA"):
-                    # Lógica para salvar mantendo a integridade mesmo com filtro
-                    indices_originais = df_lista_show.index.tolist()
-                    indices_editados = df_edit_lista.index.tolist()
-                    removidos = list(set(indices_originais) - set(indices_editados))
+                    # Pega os índices do que estava sendo mostrado (filtrado ou não)
+                    indices_visiveis = df_lista_show.index.tolist()
                     
-                    if removidos:
-                        df_lista_compras = df_lista_compras.drop(removidos)
+                    # Remove essas linhas do DataFrame original
+                    df_lista_compras = df_lista_compras.drop(indices_visiveis, errors='ignore')
                     
-                    df_lista_compras.update(df_edit_lista)
+                    # Adiciona de volta o que sobrou no editor (se o usuário apagou no editor, não volta)
+                    df_lista_compras = pd.concat([df_lista_compras, df_edit_lista], ignore_index=True)
+                    
                     salvar_lista_compras(df_lista_compras, prefixo)
                     st.success("Lista atualizada com sucesso!")
                     st.rerun()
