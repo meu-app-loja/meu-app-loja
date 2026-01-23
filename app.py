@@ -359,9 +359,10 @@ def atualizar_casa_global_em_lote(lista_atualizacoes, prefixo_origem):
 
 # --- ARQUIVOS ---
 def inicializar_arquivos(prefixo):
+    # ATUALIZADO: Adicionada 'data_emissao'
     arquivos = {
         f"{prefixo}_estoque": ['código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central', 'qtd_minima', 'validade', 'status_compra', 'qtd_comprada', 'preco_custo', 'preco_venda', 'categoria', 'ultimo_fornecedor', 'preco_sem_desconto'],
-        f"{prefixo}_historico_compras": ['data', 'produto', 'fornecedor', 'qtd', 'preco_pago', 'total_gasto', 'numero_nota', 'desconto_total_money', 'preco_sem_desconto', 'obs_importacao'],
+        f"{prefixo}_historico_compras": ['data', 'data_emissao', 'produto', 'fornecedor', 'qtd', 'preco_pago', 'total_gasto', 'numero_nota', 'desconto_total_money', 'preco_sem_desconto', 'obs_importacao'],
         f"{prefixo}_movimentacoes": ['data_hora', 'produto', 'qtd_movida'],
         f"{prefixo}_vendas": ['data_hora', 'produto', 'qtd_vendida', 'estoque_restante'],
         f"{prefixo}_lista_compras": ['produto', 'código_barras', 'qtd_sugerida', 'fornecedor', 'custo_previsto', 'data_inclusao', 'status'],
@@ -403,6 +404,9 @@ def carregar_historico(prefixo_arquivo):
                  df_h[c] = pd.to_numeric(df_h[c], errors='coerce').fillna(0)
         if 'numero_nota' not in df_h.columns: df_h['numero_nota'] = ""
         if 'obs_importacao' not in df_h.columns: df_h['obs_importacao'] = ""
+        # ATUALIZADO: Garante que a coluna 'data_emissao' exista
+        if 'data_emissao' not in df_h.columns: df_h['data_emissao'] = ""
+        
         if 'desconto_total_money' not in df_h.columns:
             if 'desconto_obtido' in df_h.columns: df_h['desconto_total_money'] = df_h['desconto_obtido'] * df_h['qtd']
             else: df_h['desconto_total_money'] = 0.0
@@ -437,13 +441,14 @@ def carregar_lista_compras(prefixo_arquivo):
         return df
     except: return pd.DataFrame()
 
-# --- XML ---
+# --- XML (ATUALIZADO) ---
 def ler_xml_nfe(arquivo_xml, df_referencia):
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
     def tag_limpa(element): return element.tag.split('}')[-1]
 
-    dados_nota = {'numero': '', 'fornecedor': '', 'data': obter_hora_manaus(), 'itens': []}
+    # ATUALIZADO: Campo 'data_emissao' adicionado
+    dados_nota = {'numero': '', 'fornecedor': '', 'data_emissao': '', 'itens': []}
     lista_nomes_ref = []
     dict_ref_ean = {}
     if not df_referencia.empty:
@@ -458,7 +463,7 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
         if info is not None:
             dados_nota['numero'] = info.find('NumeroNota').text if info.find('NumeroNota') is not None else ""
             dados_nota['fornecedor'] = info.find('Fornecedor').text if info.find('Fornecedor') is not None else ""
-            try: dados_nota['data'] = datetime.strptime(info.find('DataCompra').text, '%d/%m/%Y')
+            try: dados_nota['data_emissao'] = info.find('DataCompra').text
             except: pass
         produtos = root.findall('.//Produtos/Item')
         for item_xml in produtos:
@@ -490,9 +495,9 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
         tag = tag_limpa(elem)
         if tag == 'nNF': dados_nota['numero'] = elem.text
         elif tag == 'xNome' and dados_nota['fornecedor'] == '': dados_nota['fornecedor'] = elem.text
+        # ATUALIZADO: Captura a data completa da tag dhEmi
         elif tag == 'dhEmi':
-            try: dados_nota['data'] = datetime.strptime(elem.text[:10], '%Y-%m-%d')
-            except: pass
+            dados_nota['data_emissao'] = elem.text 
 
     dets = [e for e in root.iter() if tag_limpa(e) == 'det']
     for det in dets:
@@ -579,9 +584,9 @@ if df is not None:
             c4.metric("⚠️ Atenção (10 dias)", len(df_atencao))
             st.divider()
             
-            baixo_estoque = df[(df['qtd.estoque'] + df['qtd_central']) <= df['qtd_minima']]
-            if not baixo_estoque.empty:
-                st.warning(f"🚨 Existem {len(baixo_estoque)} produtos com estoque baixo! Vá em 'Lista de Compras' para ver.")
+            bajo_estoque = df[(df['qtd.estoque'] + df['qtd_central']) <= df['qtd_minima']]
+            if not bajo_estoque.empty:
+                st.warning(f"🚨 Existem {len(bajo_estoque)} produtos com estoque baixo! Vá em 'Lista de Compras' para ver.")
             
             st.markdown("### 🚨 Gestão de Vencimentos")
             if not df_critico.empty:
@@ -873,12 +878,32 @@ if df is not None:
 
     elif modo == "📥 Importar XML (Associação Inteligente)":
         st.title(f"📥 Importar XML")
-        modo_import = st.radio("Modo:", ["📦 Atualizar Estoque (Entrada)", "📖 Apenas Referência"], horizontal=True)
+        modo_import = st.radio("Modo:", ["📦 Atualizar Estoque (Entrada)", "📖 Apenas Referência (Histórico)"], horizontal=True)
         arquivo_xml = st.file_uploader("Arraste o XML aqui", type=['xml'])
         if arquivo_xml:
             try:
                 dados = ler_xml_nfe(arquivo_xml, df_oficial)
                 st.success(f"Nota: {dados['numero']} | Fornecedor: {dados['fornecedor']}")
+                
+                # --- ATUALIZAÇÃO 5: Seção de Datas ---
+                st.markdown("### 🗓️ Datas da Operação")
+                c_data_xml, c_data_sis = st.columns(2)
+                
+                # Exibe data do XML (apenas leitura ou aviso se não achar)
+                data_xml_str = dados.get('data_emissao', 'Não encontrada no XML')
+                c_data_xml.text_input("Data Emissão (XML):", value=data_xml_str, disabled=True, key="view_data_xml")
+                
+                # Permite editar a data de lançamento (Default: Agora)
+                agora = obter_hora_manaus()
+                with c_data_sis:
+                    st.markdown("**Data de Entrada no Sistema (Editável):**")
+                    c_d, c_h = st.columns(2)
+                    dt_lanc = c_d.date_input("Dia:", value=agora.date(), key="dt_lanc_xml")
+                    hr_lanc = c_h.time_input("Hora:", value=agora.time(), step=60, key="hr_lanc_xml")
+                
+                data_lancamento_final = datetime.combine(dt_lanc, hr_lanc)
+                # -------------------------------------
+
                 lista_visuais = sorted((df['código de barras'].astype(str) + " - " + df['nome do produto'].astype(str)).unique().tolist())
                 lista_sistema = ["(CRIAR NOVO)"] + lista_visuais
                 escolhas = {}
@@ -901,19 +926,30 @@ if df is not None:
                         esc = escolhas[i]
                         nome_final = item['nome'].upper() if esc == "(CRIAR NOVO)" else esc.split(' - ', 1)[1]
                         if esc == "(CRIAR NOVO)":
+                            # Cria produto novo (Se for 'Apenas Referência', cria com estoque 0 na loja/casa, mas registra histórico)
                             novo = {'código de barras': item['ean'], 'nome do produto': nome_final, 'qtd.estoque': item['qtd'] if "Atualizar" in modo_import else 0, 'qtd_central': 0, 'qtd_minima': 5, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': item['preco_un_liquido'], 'preco_venda': item['preco_un_liquido']*2, 'categoria': 'GERAL', 'ultimo_fornecedor': dados['fornecedor'], 'preco_sem_desconto': item['preco_un_bruto']}
                             df = pd.concat([df, pd.DataFrame([novo])], ignore_index=True)
-                            if "Atualizar" in modo_import: logs_xml.append({'data_hora': str(obter_hora_manaus()), 'produto': nome_final, 'qtd_antes': 0, 'qtd_nova': item['qtd'], 'acao': "XML Novo", 'motivo': "Entrada"})
+                            if "Atualizar" in modo_import: logs_xml.append({'data_hora': str(data_lancamento_final), 'produto': nome_final, 'qtd_antes': 0, 'qtd_nova': item['qtd'], 'acao': "XML Novo", 'motivo': "Entrada"})
                         else:
                             mask = df['nome do produto'].astype(str) == nome_final
                             if mask.any():
                                 idx = df[mask].index[0]
                                 if "Atualizar" in modo_import:
                                     df.at[idx, 'qtd_central'] += item['qtd']
-                                    logs_xml.append({'data_hora': str(obter_hora_manaus()), 'produto': nome_final, 'qtd_antes': df.at[idx, 'qtd_central']-item['qtd'], 'qtd_nova': df.at[idx, 'qtd_central'], 'acao': "XML Entrada", 'motivo': "Entrada"})
+                                    logs_xml.append({'data_hora': str(data_lancamento_final), 'produto': nome_final, 'qtd_antes': df.at[idx, 'qtd_central']-item['qtd'], 'qtd_nova': df.at[idx, 'qtd_central'], 'acao': "XML Entrada", 'motivo': "Entrada"})
                                 df.at[idx, 'preco_custo'] = item['preco_un_liquido']
                                 atualizacoes_casa_xml.append({'produto': nome_final, 'qtd_central': df.at[idx, 'qtd_central'], 'custo': item['preco_un_liquido']})
-                        novos_hist.append({'data': str(obter_hora_manaus()), 'produto': nome_final, 'fornecedor': dados['fornecedor'], 'qtd': item['qtd'], 'preco_pago': item['preco_un_liquido'], 'total_gasto': item['qtd']*item['preco_un_liquido']})
+                        
+                        # ATUALIZAÇÃO 6: Grava as duas datas no histórico
+                        novos_hist.append({
+                            'data': str(data_lancamento_final), # Data escolhida manualmente
+                            'data_emissao': data_xml_str,       # Data real da nota
+                            'produto': nome_final, 
+                            'fornecedor': dados['fornecedor'], 
+                            'qtd': item['qtd'], 
+                            'preco_pago': item['preco_un_liquido'], 
+                            'total_gasto': item['qtd']*item['preco_un_liquido']
+                        })
                     
                     salvar_estoque(df, prefixo)
                     if novos_hist: salvar_historico(pd.concat([df_hist, pd.DataFrame(novos_hist)], ignore_index=True), prefixo)
