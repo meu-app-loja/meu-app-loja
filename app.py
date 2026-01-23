@@ -7,6 +7,9 @@ import unicodedata
 from io import BytesIO
 import zipfile
 
+# --- NOVO: Biblioteca para gráficos bonitos e interativos ---
+import plotly.express as px 
+
 # --- BIBLIOTECAS DO GOOGLE SHEETS ---
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -441,13 +444,12 @@ def carregar_lista_compras(prefixo_arquivo):
         return df
     except: return pd.DataFrame()
 
-# --- XML (ATUALIZADO) ---
+# --- XML (ATUALIZADO COM CORREÇÃO DE DATA E VALORES) ---
 def ler_xml_nfe(arquivo_xml, df_referencia):
     tree = ET.parse(arquivo_xml)
     root = tree.getroot()
     def tag_limpa(element): return element.tag.split('}')[-1]
 
-    # ATUALIZADO: Campo 'data_emissao' adicionado
     dados_nota = {'numero': '', 'fornecedor': '', 'data_emissao': '', 'itens': []}
     lista_nomes_ref = []
     dict_ref_ean = {}
@@ -459,6 +461,7 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
             lista_nomes_ref.append(nm)
 
     if tag_limpa(root) == 'NotaFiscal':
+        # (Código antigo de nota simplificada, mantido por segurança)
         info = root.find('Info')
         if info is not None:
             dados_nota['numero'] = info.find('NumeroNota').text if info.find('NumeroNota') is not None else ""
@@ -480,6 +483,7 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
             item['desconto_total_item'] = desc_val
             if qtd_raw > 0:
                 item['preco_un_liquido'] = val_final / qtd_raw
+                # Se tinha desconto, o bruto é (final + desconto) / qtd
                 item['preco_un_bruto'] = (val_final + desc_val) / qtd_raw
             
             ean_xml = str(item['ean']).strip()
@@ -491,13 +495,21 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
             dados_nota['itens'].append(item)
         return dados_nota
 
+    # --- LÓGICA PADRÃO NFE (A MAIS COMUM) ---
     for elem in root.iter():
         tag = tag_limpa(elem)
         if tag == 'nNF': dados_nota['numero'] = elem.text
         elif tag == 'xNome' and dados_nota['fornecedor'] == '': dados_nota['fornecedor'] = elem.text
-        # ATUALIZADO: Captura a data completa da tag dhEmi
+        # --- ATUALIZAÇÃO 1: Limpeza da Data da Nota ---
         elif tag == 'dhEmi':
-            dados_nota['data_emissao'] = elem.text 
+            raw_date = elem.text
+            if raw_date:
+                try:
+                    # Tenta converter 2025-12-29T14:30:00-03:00 para 29/12/2025 14:30
+                    dt_obj = datetime.strptime(raw_date[:19], "%Y-%m-%dT%H:%M:%S")
+                    dados_nota['data_emissao'] = dt_obj.strftime("%d/%m/%Y %H:%M")
+                except:
+                    dados_nota['data_emissao'] = raw_date # Se falhar, usa o original
 
     dets = [e for e in root.iter() if tag_limpa(e) == 'det']
     for det in dets:
@@ -511,13 +523,14 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
                 elif t == 'cEAN': item['ean'] = info.text
                 elif t == 'xProd': item['nome'] = normalizar_texto(info.text)
                 elif t == 'qCom': qCom = float(info.text)
-                elif t == 'vProd': vProd = float(info.text)
-                elif t == 'vDesc': vDesc = float(info.text)
+                elif t == 'vProd': vProd = float(info.text) # Valor BRUTO Total do Item
+                elif t == 'vDesc': vDesc = float(info.text) # Valor DESCONTO Total do Item
             if qCom > 0:
                 item['qtd'] = qCom
-                item['preco_un_bruto'] = vProd / qCom
-                item['desconto_total_item'] = vDesc
-                item['preco_un_liquido'] = (vProd - vDesc) / qCom
+                # --- ATUALIZAÇÃO 2: Cálculo correto dos valores ---
+                item['preco_un_bruto'] = vProd / qCom  # Preço Tabela Unitário
+                item['desconto_total_item'] = vDesc    # Desconto Total (em R$)
+                item['preco_un_liquido'] = (vProd - vDesc) / qCom # Preço Pago Unitário
             ean_xml = str(item['ean']).strip()
             if ean_xml in ['SEM GTIN', '', 'None', 'NAN']:
                 item['ean'] = item['codigo_interno']
@@ -891,12 +904,12 @@ if df is not None:
                 
                 # Exibe data do XML (apenas leitura ou aviso se não achar)
                 data_xml_str = dados.get('data_emissao', 'Não encontrada no XML')
-                c_data_xml.text_input("Data Emissão (XML):", value=data_xml_str, disabled=True, key="view_data_xml")
+                c_data_xml.text_input("Data Emissão (Real da Nota - XML):", value=data_xml_str, disabled=True, key="view_data_xml")
                 
                 # Permite editar a data de lançamento (Default: Agora)
                 agora = obter_hora_manaus()
                 with c_data_sis:
-                    st.markdown("**Data de Entrada no Sistema (Editável):**")
+                    st.markdown("**Data de Lançamento no Sistema (Controle):**")
                     c_d, c_h = st.columns(2)
                     dt_lanc = c_d.date_input("Dia:", value=agora.date(), key="dt_lanc_xml")
                     hr_lanc = c_h.time_input("Hora:", value=agora.time(), step=60, key="hr_lanc_xml")
@@ -905,26 +918,39 @@ if df is not None:
                 # -------------------------------------
 
                 lista_visuais = sorted((df['código de barras'].astype(str) + " - " + df['nome do produto'].astype(str)).unique().tolist())
-                lista_sistema = ["(CRIAR NOVO)"] + lista_visuais
+                # --- ATUALIZAÇÃO 3: Melhor visualização no selectbox ---
+                lista_sistema = ["(CRIAR NOVO)"] + [f"[SISTEMA] {x}" for x in lista_visuais]
+                
                 escolhas = {}
                 for i, item in enumerate(dados['itens']):
                     match_inicial = "(CRIAR NOVO)"
                     if not df.empty:
                         mask_ean = df['código de barras'].astype(str) == item['ean']
-                        if mask_ean.any(): match_inicial = f"{df.loc[mask_ean, 'código de barras'].values[0]} - {df.loc[mask_ean, 'nome do produto'].values[0]}"
+                        if mask_ean.any(): 
+                            match_inicial = f"[SISTEMA] {df.loc[mask_ean, 'código de barras'].values[0]} - {df.loc[mask_ean, 'nome do produto'].values[0]}"
                         else:
                             melhor, _ = encontrar_melhor_match(item['nome'], df['nome do produto'].astype(str).tolist())
-                            if melhor: match_inicial = f"{df.loc[df['nome do produto']==melhor, 'código de barras'].values[0]} - {melhor}"
-                    c1, c2 = st.columns([1, 1])
-                    with c1: st.markdown(f"**{item['nome']}** (XML: {item['ean']})")
-                    with c2: escolhas[i] = st.selectbox("Vincular:", lista_sistema, index=lista_sistema.index(match_inicial) if match_inicial in lista_sistema else 0, key=f"x_{i}")
+                            if melhor: 
+                                cod_melhor = df.loc[df['nome do produto']==melhor, 'código de barras'].values[0]
+                                match_inicial = f"[SISTEMA] {cod_melhor} - {melhor}"
+                    
                     st.divider()
+                    c1, c2 = st.columns([1, 1])
+                    with c1: st.markdown(f"📦 **(XML) {item['nome']}**\n\n*EAN: {item['ean']}*")
+                    with c2: escolhas[i] = st.selectbox("Vincular a:", lista_sistema, index=lista_sistema.index(match_inicial) if match_inicial in lista_sistema else 0, key=f"x_{i}")
                 
-                if st.button("✅ CONFIRMAR"):
+                st.markdown("---")
+                if st.button("✅ CONFIRMAR IMPORTAÇÃO"):
                     novos_hist = []; logs_xml = []; atualizacoes_casa_xml = [] # LOTES
                     for i, item in enumerate(dados['itens']):
                         esc = escolhas[i]
-                        nome_final = item['nome'].upper() if esc == "(CRIAR NOVO)" else esc.split(' - ', 1)[1]
+                        # Remove o prefixo [SISTEMA] se existir
+                        if "[SISTEMA]" in esc:
+                             raw_sel = esc.replace("[SISTEMA] ", "")
+                             nome_final = raw_sel.split(' - ', 1)[1]
+                        else:
+                             nome_final = item['nome'].upper() # Cria novo com nome do XML
+
                         if esc == "(CRIAR NOVO)":
                             # Cria produto novo (Se for 'Apenas Referência', cria com estoque 0 na loja/casa, mas registra histórico)
                             novo = {'código de barras': item['ean'], 'nome do produto': nome_final, 'qtd.estoque': item['qtd'] if "Atualizar" in modo_import else 0, 'qtd_central': 0, 'qtd_minima': 5, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': item['preco_un_liquido'], 'preco_venda': item['preco_un_liquido']*2, 'categoria': 'GERAL', 'ultimo_fornecedor': dados['fornecedor'], 'preco_sem_desconto': item['preco_un_bruto']}
@@ -940,7 +966,7 @@ if df is not None:
                                 df.at[idx, 'preco_custo'] = item['preco_un_liquido']
                                 atualizacoes_casa_xml.append({'produto': nome_final, 'qtd_central': df.at[idx, 'qtd_central'], 'custo': item['preco_un_liquido']})
                         
-                        # ATUALIZAÇÃO 6: Grava as duas datas no histórico
+                        # ATUALIZAÇÃO 4: Grava TODAS as colunas financeiras corretamente
                         novos_hist.append({
                             'data': str(data_lancamento_final), # Data escolhida manualmente
                             'data_emissao': data_xml_str,       # Data real da nota
@@ -948,6 +974,8 @@ if df is not None:
                             'fornecedor': dados['fornecedor'], 
                             'qtd': item['qtd'], 
                             'preco_pago': item['preco_un_liquido'], 
+                            'preco_sem_desconto': item['preco_un_bruto'],   # Valor Tabela
+                            'desconto_total_money': item['desconto_total_item'], # Desconto em R$
                             'total_gasto': item['qtd']*item['preco_un_liquido']
                         })
                     
@@ -1173,7 +1201,7 @@ if df is not None:
             if df_hist.empty:
                 st.info("Sem histórico suficiente.")
             else:
-                st.markdown("### 🏆 Ranking: Onde comprar mais barato?")
+                st.markdown("### 🔍 Análise Detalhada por Produto")
                 df_hist['produto_str'] = df_hist['produto'].astype(str)
                 if not df.empty:
                     mapa_codigos = dict(zip(df['nome do produto'], df['código de barras']))
@@ -1193,12 +1221,46 @@ if df is not None:
                     df_prod = df_hist[df_hist['produto'] == nome_para_filtro].copy()
                     
                     if not df_prod.empty:
-                        df_ranking = df_prod.groupby('fornecedor')['preco_pago'].mean().sort_values()
-                        st.bar_chart(df_ranking)
+                        # --- KPIs (CARTÕES) ---
+                        menor_preco = df_prod['preco_pago'].min()
+                        maior_preco = df_prod['preco_pago'].max()
+                        media_preco = df_prod['preco_pago'].mean()
+                        ultimo_preco = df_prod.sort_values(by='data', ascending=False).iloc[0]['preco_pago']
+                        
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("💎 Menor Preço", f"R$ {menor_preco:.2f}")
+                        c2.metric("💸 Maior Preço", f"R$ {maior_preco:.2f}")
+                        c3.metric("📊 Média", f"R$ {media_preco:.2f}")
+                        c4.metric("📅 Último Pago", f"R$ {ultimo_preco:.2f}", delta=f"{ultimo_preco - media_preco:.2f}")
                         st.divider()
+
+                        # --- GRÁFICO 1: RANKING DE FORNECEDORES (HORIZONTAL) ---
+                        st.markdown("### 🏆 Ranking: Onde comprar mais barato?")
+                        df_ranking = df_prod.groupby('fornecedor')['preco_pago'].mean().reset_index().sort_values(by='preco_pago')
+                        fig_bar = px.bar(
+                            df_ranking, 
+                            x='preco_pago', 
+                            y='fornecedor', 
+                            orientation='h', 
+                            text_auto='.2f',
+                            title="Preço Médio por Fornecedor (Quanto menor, melhor)",
+                            color='preco_pago',
+                            color_continuous_scale='RdYlGn_r' # Verde para barato, Vermelho para caro
+                        )
+                        st.plotly_chart(fig_bar, use_container_width=True)
+
+                        # --- GRÁFICO 2: EVOLUÇÃO NO TEMPO (LINHA COM MARKERS) ---
                         st.markdown("### 📈 Evolução do Preço no Tempo")
                         df_evolucao = df_prod.sort_values(by='data')
-                        st.line_chart(df_evolucao, x='data', y='preco_pago')
+                        fig_line = px.line(
+                            df_evolucao, 
+                            x='data', 
+                            y='preco_pago', 
+                            markers=True,
+                            title="Histórico de Preço Pago",
+                            hover_data={'fornecedor': True, 'preco_pago': ':.2f'}
+                        )
+                        st.plotly_chart(fig_line, use_container_width=True)
         
         with tab_dados:
             if not df_hist.empty:
@@ -1212,7 +1274,7 @@ if df is not None:
                 mapa_ean = dict(zip(df['nome do produto'], df['código de barras']))
                 df_hist_visual['código_barras'] = df_hist_visual['produto'].map(mapa_ean)
                 
-                cols = ['data', 'código_barras', 'produto', 'fornecedor', 'qtd', 'preco_sem_desconto', 'desconto_total_money', 'preco_pago', 'total_gasto', 'obs_importacao']
+                cols = ['data', 'data_emissao', 'código_barras', 'produto', 'fornecedor', 'qtd', 'preco_sem_desconto', 'desconto_total_money', 'preco_pago', 'total_gasto', 'obs_importacao']
                 cols = [c for c in cols if c in df_hist_visual.columns]
                 df_hist_visual = df_hist_visual[cols]
                 
@@ -1223,7 +1285,8 @@ if df is not None:
                     key="editor_historico_geral",
                     num_rows="dynamic", 
                     column_config={
-                        "data": st.column_config.DatetimeColumn("Data/Hora", format="DD/MM/YYYY HH:mm"),
+                        "data": st.column_config.DatetimeColumn("Data Lançamento", format="DD/MM/YYYY HH:mm"),
+                        "data_emissao": st.column_config.TextColumn("Data Nota (XML)", disabled=True),
                         "código_barras": st.column_config.TextColumn("Cód. Barras", disabled=True),
                         "preco_sem_desconto": st.column_config.NumberColumn("Preço Tabela", format="R$ %.2f"),
                         "desconto_total_money": st.column_config.NumberColumn("Desconto TOTAL", format="R$ %.2f"),
