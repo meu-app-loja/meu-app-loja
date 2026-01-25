@@ -156,6 +156,7 @@ def unificar_produtos_por_codigo(df):
             custo_final = grupo['preco_custo'].max()
             venda_final = grupo['preco_venda'].max()
             sem_desc_final = grupo['preco_sem_desconto'].max() if 'preco_sem_desconto' in grupo.columns else 0.0
+            # Pega o status mais relevante (se tiver um ativo, considera ativo)
             status_final = 'Ativo' if 'Ativo' in grupo['status'].values else 'Inativo'
             
             base_ref = grupo[grupo['nome do produto'] == melhor_nome].iloc[0].to_dict()
@@ -558,7 +559,16 @@ def salvar_lista_compras(df, prefixo): salvar_no_google(df, f"{prefixo}_lista_co
 # ==============================================================================
 
 inicializar_arquivos(prefixo)
-df = carregar_dados(prefixo)
+
+# --- SISTEMA DE BUFFER PARA EDIÇÃO RÁPIDA (Fila) ---
+if 'df_ativo' not in st.session_state or st.session_state.get('loja_ativa_cache') != prefixo:
+    st.session_state['df_ativo'] = carregar_dados(prefixo)
+    st.session_state['loja_ativa_cache'] = prefixo
+    st.session_state['alteracoes_pendentes'] = 0
+
+# Trabalhamos com o df da memória, não o da nuvem direta
+df = st.session_state['df_ativo']
+
 df_hist = carregar_historico(prefixo)
 df_mov = carregar_movimentacoes(prefixo)
 df_vendas = carregar_vendas(prefixo)
@@ -1371,24 +1381,40 @@ if df is not None:
         with tab_ver:
             if not df.empty:
                 if usar_modo_mobile:
-                    st.info("📱 Modo Celular (Edição Rápida)")
+                    st.info("📱 Modo Celular (Edição Rápida com FILA)")
+                    
+                    # --- FILA DE PENDÊNCIAS (QUEUE) ---
+                    if st.session_state['alteracoes_pendentes'] > 0:
+                        st.warning(f"⚠️ {st.session_state['alteracoes_pendentes']} alterações pendentes na memória.")
+                        if st.button("☁️ SINCRONIZAR AGORA (Gravar no Google)"):
+                            salvar_estoque(df, prefixo) # Salva o dataframe inteiro acumulado
+                            st.session_state['alteracoes_pendentes'] = 0
+                            st.success("Sincronizado com sucesso!")
+                            st.rerun()
+                    else:
+                        st.success("✅ Tudo sincronizado.")
+                    
+                    st.markdown("---")
+                    
                     busca_central = st.text_input("🔍 Buscar na Casa:", placeholder="Ex: arroz...")
                     df_show = filtrar_dados_inteligente(df, 'nome do produto', busca_central)
                     for idx, row in df_show.iterrows():
                         with st.container(border=True):
                             st.write(f"📝 {row['código_barras']} | **{row['nome do produto']}**")
                             col1, col2 = st.columns(2)
+                            # Usa key unica para cada input
                             nova_qtd = col1.number_input(f"Qtd Casa:", value=int(row['qtd_central']), key=f"q_{idx}")
                             novo_custo = col2.number_input(f"Custo:", value=float(row['preco_custo']), key=f"c_{idx}")
-                            if st.button(f"💾 Salvar {row['nome do produto']}", key=f"btn_{idx}"):
-                                qtd_antiga = df.at[idx, 'qtd_central']
+                            
+                            if st.button(f"💾 Confirmar {row['nome do produto']} (Local)", key=f"btn_{idx}"):
+                                # ATUALIZA APENAS NA MEMÓRIA LOCAL
                                 df.at[idx, 'qtd_central'] = nova_qtd
                                 df.at[idx, 'preco_custo'] = novo_custo
-                                salvar_estoque(df, prefixo)
-                                atualizar_casa_global(row['nome do produto'], nova_qtd, novo_custo, None, None, prefixo)
-                                registrar_auditoria(prefixo, row['nome do produto'], qtd_antiga, nova_qtd, "Edição Mobile Casa")
-                                st.success("Salvo!")
-                                st.rerun()
+                                
+                                # Incrementa pendencias
+                                st.session_state['alteracoes_pendentes'] += 1
+                                st.toast(f"Salvo localmente! ({st.session_state['alteracoes_pendentes']} pendentes)")
+                                st.rerun() # Atualiza a tela para mostrar o aviso de pendencia
                 else:
                     st.info("✏️ Edição direta.")
                     busca_central = st.text_input("🔍 Buscar Produto na Casa:", placeholder="Ex: oleo concordia...", key="busca_central")
