@@ -21,6 +21,8 @@ st.set_page_config(page_title="Gestão Multi-Lojas", layout="wide", page_icon="�
 # ==============================================================================
 # ☁️ CONEXÃO COM GOOGLE SHEETS (COM CACHE E PROTEÇÃO)
 # ==============================================================================
+# --- CORREÇÃO CIRÚRGICA 1: Adicionado cache_resource para manter a conexão aberta e rápida ---
+@st.cache_resource
 def conectar_google_sheets():
     """Conecta ao Google Sheets usando as credenciais dos Secrets do Streamlit."""
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -33,10 +35,8 @@ def conectar_google_sheets():
 def carregar_do_google(nome_aba):
     """Lê uma aba específica da planilha e transforma em DataFrame (Com Cache)."""
     try:
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(st.secrets["gcp_service_account"], scope)
-        client = gspread.authorize(creds)
-        sh = client.open("Sistema_Estoque_Database")
+        # --- CORREÇÃO CIRÚRGICA 2: Usa a conexão já aberta (Cache) para evitar travamento ---
+        sh = conectar_google_sheets()
 
         try:
             worksheet = sh.worksheet(nome_aba)
@@ -67,6 +67,7 @@ def salvar_no_google(df, nome_aba, permitir_vazio=False):
     try:
         st.cache_data.clear() # Limpa memória para ver os dados novos
         
+        # Usa a conexão segura do cache
         client = conectar_google_sheets()
         sh = client
         try:
@@ -86,6 +87,8 @@ def salvar_no_google(df, nome_aba, permitir_vazio=False):
         worksheet.clear()
         if dados_lista:
             worksheet.update(dados_lista)
+            # --- CORREÇÃO CIRÚRGICA 3: Pausa de 2 segundos para o sistema não cair (Erro 429) ---
+            time.sleep(2)
         
     except Exception as e:
         st.error(f"ERRO DE CONEXÃO AO SALVAR ({nome_aba}): {e}. Tente novamente em alguns segundos.")
@@ -1013,7 +1016,7 @@ if df is not None:
                             'fornecedor': dados['fornecedor'], 
                             'qtd': item['qtd'], 
                             'preco_pago': item['preco_un_liquido'], 
-                            'preco_sem_desconto': item['preco_un_bruto'],   # Valor Tabela
+                            'preco_sem_desconto': item['preco_un_bruto'],    # Valor Tabela
                             'desconto_total_money': item['desconto_total_item'], # Desconto em R$
                             'total_gasto': item['qtd']*item['preco_un_liquido']
                         })
