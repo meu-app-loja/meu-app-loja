@@ -112,11 +112,11 @@ def normalizar_para_busca(texto):
 def calcular_pontuacao(nome_xml, nome_sistema):
     set_xml = set(normalizar_para_busca(nome_xml).split())
     set_sis = set(normalizar_para_busca(nome_sistema).split())
-    comum = set_xml.intersection(set_sis)
-    if not comum: return 0.0
+    common = set_xml.intersection(set_sis)
+    if not common: return 0.0
     total = set_xml.union(set_sis)
-    score = len(comum) / len(total)
-    for palavra in comum:
+    score = len(common) / len(total)
+    for palavra in common:
         if any(u in palavra for u in ['L', 'ML', 'KG', 'G', 'M']): 
             if any(c.isdigit() for c in palavra):
                 score += 0.5
@@ -156,6 +156,7 @@ def unificar_produtos_por_codigo(df):
             custo_final = grupo['preco_custo'].max()
             venda_final = grupo['preco_venda'].max()
             sem_desc_final = grupo['preco_sem_desconto'].max() if 'preco_sem_desconto' in grupo.columns else 0.0
+            status_final = 'Ativo' if 'Ativo' in grupo['status'].values else 'Inativo'
             
             base_ref = grupo[grupo['nome do produto'] == melhor_nome].iloc[0].to_dict()
             base_ref['qtd.estoque'] = soma_loja
@@ -163,6 +164,7 @@ def unificar_produtos_por_codigo(df):
             base_ref['preco_custo'] = custo_final
             base_ref['preco_venda'] = venda_final
             base_ref['preco_sem_desconto'] = sem_desc_final
+            base_ref['status'] = status_final
             lista_final.append(base_ref)
         else:
             lista_final.append(grupo.iloc[0].to_dict())
@@ -362,9 +364,9 @@ def atualizar_casa_global_em_lote(lista_atualizacoes, prefixo_origem):
 
 # --- ARQUIVOS ---
 def inicializar_arquivos(prefixo):
-    # ATUALIZADO: Adicionada 'data_emissao'
+    # ATUALIZADO: Adicionada 'data_emissao' e 'status'
     arquivos = {
-        f"{prefixo}_estoque": ['código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central', 'qtd_minima', 'validade', 'status_compra', 'qtd_comprada', 'preco_custo', 'preco_venda', 'categoria', 'ultimo_fornecedor', 'preco_sem_desconto'],
+        f"{prefixo}_estoque": ['código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central', 'qtd_minima', 'validade', 'status_compra', 'qtd_comprada', 'preco_custo', 'preco_venda', 'categoria', 'ultimo_fornecedor', 'preco_sem_desconto', 'status'],
         f"{prefixo}_historico_compras": ['data', 'data_emissao', 'produto', 'fornecedor', 'qtd', 'preco_pago', 'total_gasto', 'numero_nota', 'desconto_total_money', 'preco_sem_desconto', 'obs_importacao'],
         f"{prefixo}_movimentacoes": ['data_hora', 'produto', 'qtd_movida'],
         f"{prefixo}_vendas": ['data_hora', 'produto', 'qtd_vendida', 'estoque_restante'],
@@ -381,6 +383,9 @@ def carregar_dados(prefixo_arquivo):
         if df.empty: return pd.DataFrame()
         df.columns = df.columns.str.strip().str.lower()
         if 'preco_sem_desconto' not in df.columns: df['preco_sem_desconto'] = 0.0
+        # --- ATUALIZAÇÃO ESTRUTURAL: STATUS ---
+        if 'status' not in df.columns: df['status'] = 'Ativo'
+        
         cols_num = ['qtd.estoque', 'qtd_central', 'qtd_minima', 'qtd_comprada', 'preco_custo', 'preco_venda', 'preco_sem_desconto']
         for col in cols_num:
             if col in df.columns: 
@@ -576,7 +581,8 @@ if df is not None:
         "🏠 Gôndola (Loja)", 
         "💰 Inteligência de Compras (Histórico)",
         "🏡 Estoque Central (Casa)",
-        "📋 Tabela Geral"
+        "📋 Tabela Geral",
+        "🛠️ Ajuste & Limpeza"
     ])
 
     if modo == "📊 Dashboard (Visão Geral)":
@@ -585,21 +591,24 @@ if df is not None:
             st.info("Comece cadastrando produtos.")
         else:
             hoje = obter_hora_manaus()
-            df_valido = df[pd.notnull(df['validade'])].copy()
+            # --- ATUALIZAÇÃO 4: Filtros considerando STATUS ATIVO ---
+            df_valido = df[(pd.notnull(df['validade'])) & (df['status'] == 'Ativo')].copy()
+            df_ativos = df[df['status'] == 'Ativo']
+            
             df_critico = df_valido[(df_valido['validade'] <= hoje + timedelta(days=5)) & ((df_valido['qtd.estoque'] > 0) | (df_valido['qtd_central'] > 0))]
             df_atencao = df_valido[(df_valido['validade'] > hoje + timedelta(days=5)) & (df_valido['validade'] <= hoje + timedelta(days=10))]
-            valor_estoque = (df['qtd.estoque'] * df['preco_custo']).sum() + (df['qtd_central'] * df['preco_custo']).sum()
+            valor_estoque = (df_ativos['qtd.estoque'] * df_ativos['preco_custo']).sum() + (df_ativos['qtd_central'] * df_ativos['preco_custo']).sum()
             
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("📦 Itens na Loja", int(df['qtd.estoque'].sum()))
+            c1.metric("📦 Itens (Ativos)", int(df_ativos['qtd.estoque'].sum()))
             c2.metric("💰 Valor Investido", f"R$ {formatar_moeda_br(valor_estoque)}")
             c3.metric("🚨 Vencendo (5 dias)", len(df_critico))
             c4.metric("⚠️ Atenção (10 dias)", len(df_atencao))
             st.divider()
             
-            bajo_estoque = df[(df['qtd.estoque'] + df['qtd_central']) <= df['qtd_minima']]
+            bajo_estoque = df_ativos[(df_ativos['qtd.estoque'] + df_ativos['qtd_central']) <= df_ativos['qtd_minima']]
             if not bajo_estoque.empty:
-                st.warning(f"🚨 Existem {len(bajo_estoque)} produtos com estoque baixo! Vá em 'Lista de Compras' para ver.")
+                st.warning(f"🚨 Existem {len(bajo_estoque)} produtos ATIVOS com estoque baixo! Vá em 'Lista de Compras'.")
             
             st.markdown("### 🚨 Gestão de Vencimentos")
             if not df_critico.empty:
@@ -784,13 +793,16 @@ if df is not None:
                 st.info("Sua lista de compras está vazia.")
 
         with tab_add:
-            st.subheader("🤖 Gerador Automático")
+            st.subheader("🤖 Gerador Automático (Somente Ativos)")
             if st.button("🚀 Gerar Lista Baseada no Estoque Baixo"):
                 if df.empty: st.warning("Sem produtos.")
                 else:
-                    mask_baixo = (df['qtd.estoque'] + df['qtd_central']) <= df['qtd_minima']
-                    produtos_baixo = df[mask_baixo]
-                    if produtos_baixo.empty: st.success("Tudo certo!")
+                    # --- ATUALIZAÇÃO 4: Filtra apenas ativos ---
+                    df_ativos = df[df['status'] == 'Ativo']
+                    mask_baixo = (df_ativos['qtd.estoque'] + df_ativos['qtd_central']) <= df_ativos['qtd_minima']
+                    produtos_baixo = df_ativos[mask_baixo]
+                    
+                    if produtos_baixo.empty: st.success("Tudo certo! Nenhum produto ativo com estoque baixo.")
                     else:
                         novos_itens = []
                         for _, row in produtos_baixo.iterrows():
@@ -882,7 +894,7 @@ if df is not None:
                 if not novo_cod or not novo_nome: st.error("Código e Nome obrigatórios!")
                 elif not df.empty and df['código de barras'].astype(str).str.contains(str(novo_cod).strip()).any(): st.error("Código já existe!")
                 else:
-                    novo = {'código de barras': str(novo_cod).strip(), 'nome do produto': novo_nome.upper().strip(), 'qtd.estoque': ini_loja, 'qtd_central': ini_casa, 'qtd_minima': novo_min, 'validade': pd.to_datetime(ini_val) if ini_val else None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': novo_custo, 'preco_venda': novo_venda, 'categoria': nova_cat, 'ultimo_fornecedor': '', 'preco_sem_desconto': 0.0}
+                    novo = {'código de barras': str(novo_cod).strip(), 'nome do produto': novo_nome.upper().strip(), 'qtd.estoque': ini_loja, 'qtd_central': ini_casa, 'qtd_minima': novo_min, 'validade': pd.to_datetime(ini_val) if ini_val else None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': novo_custo, 'preco_venda': novo_venda, 'categoria': nova_cat, 'ultimo_fornecedor': '', 'preco_sem_desconto': 0.0, 'status': 'Ativo'}
                     df = pd.concat([df, pd.DataFrame([novo])], ignore_index=True)
                     salvar_estoque(df, prefixo)
                     registrar_auditoria(prefixo, novo_nome.upper().strip(), 0, ini_loja, "Novo Cadastro")
@@ -953,7 +965,7 @@ if df is not None:
 
                         if esc == "(CRIAR NOVO)":
                             # Cria produto novo (Se for 'Apenas Referência', cria com estoque 0 na loja/casa, mas registra histórico)
-                            novo = {'código de barras': item['ean'], 'nome do produto': nome_final, 'qtd.estoque': item['qtd'] if "Atualizar" in modo_import else 0, 'qtd_central': 0, 'qtd_minima': 5, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': item['preco_un_liquido'], 'preco_venda': item['preco_un_liquido']*2, 'categoria': 'GERAL', 'ultimo_fornecedor': dados['fornecedor'], 'preco_sem_desconto': item['preco_un_bruto']}
+                            novo = {'código de barras': item['ean'], 'nome do produto': nome_final, 'qtd.estoque': item['qtd'] if "Atualizar" in modo_import else 0, 'qtd_central': 0, 'qtd_minima': 5, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': item['preco_un_liquido'], 'preco_venda': item['preco_un_liquido']*2, 'categoria': 'GERAL', 'ultimo_fornecedor': dados['fornecedor'], 'preco_sem_desconto': item['preco_un_bruto'], 'status': 'Ativo'}
                             df = pd.concat([df, pd.DataFrame([novo])], ignore_index=True)
                             if "Atualizar" in modo_import: logs_xml.append({'data_hora': str(data_lancamento_final), 'produto': nome_final, 'qtd_antes': 0, 'qtd_nova': item['qtd'], 'acao': "XML Novo", 'motivo': "Entrada"})
                         else:
@@ -964,6 +976,8 @@ if df is not None:
                                     df.at[idx, 'qtd_central'] += item['qtd']
                                     logs_xml.append({'data_hora': str(data_lancamento_final), 'produto': nome_final, 'qtd_antes': df.at[idx, 'qtd_central']-item['qtd'], 'qtd_nova': df.at[idx, 'qtd_central'], 'acao': "XML Entrada", 'motivo': "Entrada"})
                                 df.at[idx, 'preco_custo'] = item['preco_un_liquido']
+                                df.at[idx, 'ultimo_fornecedor'] = dados['fornecedor'] # CORREÇÃO: Atualiza fornecedor
+                                df.at[idx, 'status'] = 'Ativo' # CORREÇÃO: Reativa se comprou
                                 atualizacoes_casa_xml.append({'produto': nome_final, 'qtd_central': df.at[idx, 'qtd_central'], 'custo': item['preco_un_liquido']})
                         
                         # ATUALIZAÇÃO 4: Grava TODAS as colunas financeiras corretamente
@@ -1031,7 +1045,7 @@ if df is not None:
                                 else:
                                     val_p = 0.0
                                     if idx_preco != "(Ignorar)": val_p = pd.to_numeric(df_raw.iloc[i, idx_preco], errors='coerce') or 0.0
-                                    novos_prods.append({'código de barras': cod, 'nome do produto': nome, 'qtd.estoque': qtd, 'qtd_central': 0, 'qtd_minima': 5, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': 0.0, 'preco_venda': val_p, 'categoria': 'GERAL', 'ultimo_fornecedor': '', 'preco_sem_desconto': 0.0})
+                                    novos_prods.append({'código de barras': cod, 'nome do produto': nome, 'qtd.estoque': qtd, 'qtd_central': 0, 'qtd_minima': 5, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': 0.0, 'preco_venda': val_p, 'categoria': 'GERAL', 'ultimo_fornecedor': '', 'preco_sem_desconto': 0.0, 'status': 'Ativo'})
                         except: pass
                         bar.progress((i+1)/total_linhas)
                     
@@ -1039,6 +1053,7 @@ if df is not None:
                     salvar_estoque(df, prefixo)
                     salvar_logs_em_lote(prefixo, logs_plano) # SALVA LOTE
                     st.success("Sincronizado!")
+                    st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
 
     elif modo == "📉 Baixar Vendas (Do Relatório)":
@@ -1082,6 +1097,10 @@ if df is not None:
 
     elif modo == "🏠 Gôndola (Loja)":
         st.title(f"🏠 Gôndola - {loja_atual}")
+        
+        # --- ATUALIZAÇÃO 6: Inventário Inteligente ---
+        reativar_auto = st.checkbox("☑️ Reativar automaticamente produtos contados? (Inventário Inteligente)", value=True)
+        
         if df.empty:
             st.warning("Cadastre produtos.")
         else:
@@ -1095,13 +1114,7 @@ if df is not None:
                     for idx, row in df_show.iterrows():
                         cor_borda = "grey"
                         # --- MELHORIA 3: Semáforo Visual ---
-                        icon_status = "🟢"
-                        if row['qtd.estoque'] <= 0: 
-                            cor_borda = "red"
-                            icon_status = "🔴"
-                        elif row['qtd.estoque'] < row['qtd_minima']: 
-                            cor_borda = "orange"
-                            icon_status = "🟡"
+                        icon_status = "🟢" if row['status'] == 'Ativo' else "🔴"
                         
                         with st.container(border=True):
                             # --- CORREÇÃO: ADICIONADO CÓDIGO DE BARRAS NO TÍTULO ---
@@ -1116,6 +1129,11 @@ if df is not None:
                                     if col_btn.form_submit_button("⬇️ Baixar"):
                                         df.at[idx, 'qtd.estoque'] += q_tr
                                         df.at[idx, 'qtd_central'] -= q_tr
+                                        # --- INVENTÁRIO INTELIGENTE ---
+                                        if reativar_auto and df.at[idx, 'status'] == 'Inativo':
+                                            df.at[idx, 'status'] = 'Ativo'
+                                            st.toast(f"{row['nome do produto']} REATIVADO!")
+                                        
                                         salvar_estoque(df, prefixo)
                                         atualizar_casa_global(row['nome do produto'], df.at[idx, 'qtd_central'], None, None, None, prefixo)
                                         registrar_auditoria(prefixo, row['nome do produto'], 0, q_tr, "Baixa Gôndola Mobile")
@@ -1137,6 +1155,10 @@ if df is not None:
                         c2.success(f"Casa: {int(df.at[idx, 'qtd_central'])}")
                         val = df.at[idx, 'validade']
                         c3.write(f"Validade: {val.strftime('%d/%m/%Y') if pd.notnull(val) else 'Sem data'}")
+                        
+                        # --- STATUS ---
+                        st.caption(f"Status Atual: {'🟢 Ativo' if df.at[idx, 'status']=='Ativo' else '🔴 Inativo'}")
+                        
                         st.divider()
                         
                         st.subheader("🚚 Transferência (Casa -> Loja)")
@@ -1153,6 +1175,10 @@ if df is not None:
                                 if qtd_transf > 0:
                                     df.at[idx, 'qtd.estoque'] += qtd_transf
                                     df.at[idx, 'qtd_central'] -= qtd_transf
+                                    # --- INVENTÁRIO INTELIGENTE ---
+                                    if reativar_auto and df.at[idx, 'status'] == 'Inativo':
+                                        df.at[idx, 'status'] = 'Ativo'
+                                    
                                     salvar_estoque(df, prefixo)
                                     atualizar_casa_global(nome_prod, df.at[idx, 'qtd_central'], None, None, None, prefixo)
                                     data_final = datetime.combine(dt_transf, hr_transf)
@@ -1279,6 +1305,10 @@ if df is not None:
                 df_hist_visual = df_hist_visual[cols]
                 
                 st.info("✅ Edite ou exclua (Delete) linhas.")
+                
+                # --- CHECKBOX DE SEGURANÇA PARA ESTORNO ---
+                estornar_estoque = st.checkbox("⚠️ Ao excluir uma linha, deseja ESTORNAR (Remover) a quantidade do Estoque Físico? (Cuidado!)", value=False)
+                
                 df_editado = st.data_editor(
                     df_hist_visual.sort_values(by='data', ascending=False), 
                     use_container_width=True, 
@@ -1298,7 +1328,21 @@ if df is not None:
                     indices_originais = df_hist_visual.index.tolist()
                     indices_editados = df_editado.index.tolist()
                     indices_removidos = list(set(indices_originais) - set(indices_editados))
+                    
                     if indices_removidos:
+                        if estornar_estoque:
+                            # --- LÓGICA DE ESTORNO ---
+                            for idx_rem in indices_removidos:
+                                nome_prod = df_hist.loc[idx_rem, 'produto']
+                                qtd_rem = float(df_hist.loc[idx_rem, 'qtd'])
+                                
+                                mask_est = df['nome do produto'] == nome_prod
+                                if mask_est.any():
+                                    idx_est = df[mask_est].index[0]
+                                    df.at[idx_est, 'qtd_central'] -= qtd_rem # Estorna da Casa
+                                    st.toast(f"Estornado {qtd_rem} de {nome_prod}")
+                            salvar_estoque(df, prefixo)
+                        
                         df_hist = df_hist.drop(indices_removidos)
                         st.warning(f"🗑️ {len(indices_removidos)} registros excluídos.")
                     
@@ -1439,7 +1483,17 @@ if df is not None:
             st.info("💡 Botão 'CORRIGIR E UNIFICAR' abaixo ajuda a remover duplicados.")
             busca_geral = st.text_input("🔍 Buscar na Tabela Geral:", placeholder="Ex: oleo concordia...", key="busca_geral")
             df_visual_geral = filtrar_dados_inteligente(df, 'nome do produto', busca_geral)
-            df_edit = st.data_editor(df_visual_geral, use_container_width=True, num_rows="dynamic", key="geral_editor")
+            
+            # --- ATUALIZAÇÃO 6: Coluna Status Editável ---
+            df_edit = st.data_editor(
+                df_visual_geral, 
+                use_container_width=True, 
+                num_rows="dynamic", 
+                key="geral_editor",
+                column_config={
+                    "status": st.column_config.SelectboxColumn("Status", options=["Ativo", "Inativo"], help="Defina se o produto está ativo para compras.")
+                }
+            )
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("💾 SALVAR ALTERAÇÕES GERAIS"):
@@ -1475,3 +1529,57 @@ if df is not None:
                     st.success(f"✅ Mágica feita! {qtd_antes - qtd_depois} duplicados unidos.")
                     st.balloons()
                     st.rerun()
+
+    elif modo == "🛠️ Ajuste & Limpeza":
+        st.title("🛠️ Ajuste & Limpeza de Estoque")
+        st.info("Ferramentas para corrigir erros e limpar o cadastro.")
+        
+        c_z1, c_z2 = st.columns(2)
+        with c_z1:
+            st.markdown("### 📉 Zerar Negativos")
+            st.write("Transforma todo estoque negativo em ZERO.")
+            if st.button("ZERAR ESTOQUE NEGATIVO AGORA"):
+                mask_neg = df['qtd.estoque'] < 0
+                count_neg = mask_neg.sum()
+                if count_neg > 0:
+                    df.loc[mask_neg, 'qtd.estoque'] = 0
+                    salvar_estoque(df, prefixo)
+                    st.success(f"✅ {count_neg} produtos negativos foram zerados!")
+                    st.rerun()
+                else:
+                    st.info("Nenhum produto negativo encontrado.")
+        
+        st.divider()
+        st.markdown("### 🧹 Inativar em Massa (Fantasmas)")
+        st.write("Liste produtos com estoque ZERO (ou 1) para inativar rapidamente.")
+        
+        limite_f = st.number_input("Mostrar produtos com estoque MENOR ou IGUAL a:", value=0, min_value=0)
+        
+        # Filtra apenas ativos e baixo estoque
+        df_fantasmas = df[(df['status'] == 'Ativo') & (df['qtd.estoque'] <= limite_f)].copy()
+        
+        if not df_fantasmas.empty:
+            df_fantasmas['Selecionar'] = False
+            df_fantasmas_edit = st.data_editor(
+                df_fantasmas[['Selecionar', 'nome do produto', 'qtd.estoque', 'ultimo_fornecedor']], 
+                hide_index=True, 
+                use_container_width=True
+            )
+            
+            if st.button("🔴 INATIVAR SELECIONADOS"):
+                selecionados = df_fantasmas_edit[df_fantasmas_edit['Selecionar']]
+                if not selecionados.empty:
+                    count_inativados = 0
+                    for _, row in selecionados.iterrows():
+                        mask = df['nome do produto'] == row['nome do produto']
+                        if mask.any():
+                            df.loc[mask, 'status'] = 'Inativo'
+                            count_inativados += 1
+                    
+                    salvar_estoque(df, prefixo)
+                    st.success(f"✅ {count_inativados} produtos inativados! Eles não aparecerão mais na Lista de Compras.")
+                    st.rerun()
+                else:
+                    st.warning("Selecione algum produto na tabela acima.")
+        else:
+            st.success("Tudo limpo! Nenhum produto ativo com estoque baixo encontrado.")
