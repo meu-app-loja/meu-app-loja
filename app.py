@@ -561,19 +561,19 @@ def salvar_lista_compras(df, prefixo): salvar_no_google(df, f"{prefixo}_lista_co
 inicializar_arquivos(prefixo)
 
 # --- SISTEMA DE BUFFER PARA EDIÇÃO RÁPIDA (Fila) ---
+# Inicializa o dataframe ativo na sessão para evitar recargas constantes da nuvem
 if 'df_ativo' not in st.session_state or st.session_state.get('loja_ativa_cache') != prefixo:
     st.session_state['df_ativo'] = carregar_dados(prefixo)
     st.session_state['loja_ativa_cache'] = prefixo
     st.session_state['alteracoes_pendentes'] = 0
 
-# Trabalhamos com o df da memória, não o da nuvem direta
+# Trabalhamos com o df da memória (session_state), não o da nuvem direta
 df = st.session_state['df_ativo']
 
-df_hist = carregar_historico(prefixo)
-df_mov = carregar_movimentacoes(prefixo)
-df_vendas = carregar_vendas(prefixo)
-df_oficial = carregar_base_oficial()
-df_lista_compras = carregar_lista_compras(prefixo)
+# Carrega outras tabelas APENAS sob demanda dentro dos menus (Otimização de Velocidade)
+# df_hist, df_mov, etc. serão carregados dentro dos ifs abaixo
+
+df_oficial = carregar_base_oficial() # Este é leve e usado no XML, pode manter aqui ou mover
 ids_processados = carregar_ids_processados(prefixo)
 
 if df is not None:
@@ -597,6 +597,10 @@ if df is not None:
 
     if modo == "📊 Dashboard (Visão Geral)":
         st.title(f"📊 Painel de Controle (Nuvem) - {loja_atual}")
+        
+        # Carrega lista de compras aqui pois é usada no aviso
+        df_lista_compras = carregar_lista_compras(prefixo)
+
         if df.empty:
             st.info("Comece cadastrando produtos.")
         else:
@@ -691,6 +695,10 @@ if df is not None:
 
     elif modo == "🚚 Transferência em Massa (Picklist)":
         st.title(f"🚚 Transferência em Massa - {loja_atual}")
+        
+        # Carrega movimentações apenas aqui (Otimização)
+        df_mov = carregar_movimentacoes(prefixo)
+        
         arquivos_pick = st.file_uploader("📂 Subir Picklist (.xlsx)", type=['xlsx', 'xls'], accept_multiple_files=True)
         if arquivos_pick:
             try:
@@ -755,6 +763,10 @@ if df is not None:
 
     elif modo == "📝 Lista de Compras (Planejamento)":
         st.title("📝 Planejamento de Compras")
+        
+        # Carrega lista apenas aqui (Otimização)
+        df_lista_compras = carregar_lista_compras(prefixo)
+        
         tab_lista, tab_add = st.tabs(["📋 Ver Lista Atual (Editável)", "➕ Adicionar Itens"])
         with tab_lista:
             if not df_lista_compras.empty:
@@ -913,6 +925,9 @@ if df is not None:
 
     elif modo == "📥 Importar XML (Associação Inteligente)":
         st.title(f"📥 Importar XML")
+        # Carrega histórico apenas aqui para gerar os registros
+        df_hist = carregar_historico(prefixo)
+        
         modo_import = st.radio("Modo:", ["📦 Atualizar Estoque (Entrada)", "📖 Apenas Referência (Histórico)"], horizontal=True)
         arquivo_xml = st.file_uploader("Arraste o XML aqui", type=['xml'])
         if arquivo_xml:
@@ -1068,6 +1083,10 @@ if df is not None:
 
     elif modo == "📉 Baixar Vendas (Do Relatório)":
         st.title(f"📉 Baixar Vendas")
+        
+        # Carrega dados pesados apenas aqui
+        df_vendas = carregar_vendas(prefixo)
+        
         tab_imp, tab_hist = st.tabs(["📂 Importar", "📜 Histórico"])
         with tab_imp:
             arquivo_vendas = st.file_uploader("Relatório", type=['xlsx', 'xls'])
@@ -1110,6 +1129,9 @@ if df is not None:
         
         # --- ATUALIZAÇÃO 6: Inventário Inteligente ---
         reativar_auto = st.checkbox("☑️ Reativar automaticamente produtos contados? (Inventário Inteligente)", value=True)
+        
+        # Carrega mov apenas aqui
+        df_mov = carregar_movimentacoes(prefixo)
         
         if df.empty:
             st.warning("Cadastre produtos.")
@@ -1231,6 +1253,10 @@ if df is not None:
 
     elif modo == "💰 Inteligência de Compras (Histórico)":
         st.title("💰 Inteligência de Compras")
+        
+        # Carrega histórico apenas aqui
+        df_hist = carregar_historico(prefixo)
+        
         tab_graf, tab_dados = st.tabs(["📊 Análise & Gráficos", "📜 Histórico Completo (Editar)"])
         
         with tab_graf:
@@ -1446,6 +1472,9 @@ if df is not None:
                         st.rerun()
         with tab_gerenciar:
             st.info("Adicione mercadoria manualmente.")
+            # Carrega histórico apenas se precisar
+            df_hist = carregar_historico(prefixo)
+            
             if not df.empty:
                 lista_visuais = (df['código de barras'].astype(str) + " - " + df['nome do produto'].astype(str)).unique().tolist()
                 lista_visuais = sorted(lista_visuais)
