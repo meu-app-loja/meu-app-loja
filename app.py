@@ -301,7 +301,7 @@ def salvar_ids_processados(prefixo, novos_ids):
 
 # --- 🏡 ATUALIZAÇÃO DE CASA GLOBAL (AGORA EM LOTE) ---
 def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, nova_validade, prefixo_ignorar):
-    """Atualiza 1 produto em todas as lojas (Modo Antigo)."""
+    """Atualiza 1 produto in todas as lojas (Modo Antigo)."""
     todas_lojas = ["loja1", "loja2", "loja3"]
     for loja in todas_lojas:
         if loja == prefixo_ignorar: continue
@@ -581,6 +581,7 @@ ids_processados = carregar_ids_processados(prefixo)
 
 if df is not None:
     st.sidebar.title("🏪 Menu")
+    # --- AQUI ESTA A ALTERAÇÃO CIRURGICA NO MENU (Adicionei a última opção) ---
     modo = st.sidebar.radio("Navegar:", [
         "📊 Dashboard (Visão Geral)",
         "⚖️ Conciliação (Shoppbud vs App)",
@@ -595,7 +596,8 @@ if df is not None:
         "💰 Inteligência de Compras (Histórico)",
         "🏡 Estoque Central (Casa)",
         "📋 Tabela Geral",
-        "🛠️ Ajuste & Limpeza"
+        "🛠️ Ajuste & Limpeza",
+        "♻️ Restaurar Histórico"
     ])
 
     if modo == "📊 Dashboard (Visão Geral)":
@@ -1641,3 +1643,71 @@ if df is not None:
                     st.warning("Selecione algum produto na tabela acima.")
         else:
             st.success("Tudo limpo! Nenhum produto ativo com estoque baixo encontrado.")
+
+    # ==============================================================================
+    # ♻️ NOVA FERRAMENTA: RESTAURAR HISTÓRICO (ADICIONADA CIRURGICAMENTE NO FINAL)
+    # ==============================================================================
+    elif modo == "♻️ Restaurar Histórico":
+        st.title("♻️ Restaurador Inteligente de Histórico")
+        st.info("Esta ferramenta junta seus backups (Excel/CSV) com o sistema e remove duplicatas.")
+
+        # 1. Carrega o que já existe na nuvem hoje (pode estar incompleto)
+        df_atual = carregar_historico(prefixo)
+        st.write(f"📊 Linhas atualmente no sistema: **{len(df_atual)}**")
+
+        # 2. Upload dos Backups (Pode selecionar vários)
+        arquivos_backup = st.file_uploader("📂 Solte suas planilhas de backup aqui (Excel/CSV):", accept_multiple_files=True)
+        
+        if arquivos_backup:
+            lista_dfs = [df_atual] # Começa com o atual
+            
+            for arq in arquivos_backup:
+                try:
+                    if arq.name.endswith('.csv'):
+                        df_temp = pd.read_csv(arq)
+                    else:
+                        df_temp = pd.read_excel(arq)
+                    
+                    # Padroniza nomes das colunas para evitar erro
+                    df_temp.columns = df_temp.columns.str.strip().str.lower()
+                    lista_dfs.append(df_temp)
+                    st.caption(f"✅ Lido: {arq.name} ({len(df_temp)} linhas)")
+                except Exception as e:
+                    st.error(f"Erro ao ler {arq.name}: {e}")
+
+            if st.button("🚀 UNIFICAR E LIMPAR DUPLICATAS"):
+                # 3. Junta tudo numa tabela só
+                df_gigante = pd.concat(lista_dfs, ignore_index=True)
+                qtd_bruta = len(df_gigante)
+
+                # 4. A Mágica do Python: Remove Duplicatas
+                # Consideramos duplicado se Data, Produto e Qtd forem iguais
+                cols_chave = ['data', 'produto', 'qtd', 'total_gasto']
+                
+                # Garante que as colunas existem antes de filtrar
+                cols_validas = [c for c in cols_chave if c in df_gigante.columns]
+                
+                if cols_validas:
+                    # Remove duplicatas mantendo a primeira ocorrência
+                    df_limpo = df_gigante.drop_duplicates(subset=cols_validas, keep='first')
+                    
+                    # Ordena por data (mais recente primeiro)
+                    if 'data' in df_limpo.columns:
+                        df_limpo['data'] = pd.to_datetime(df_limpo['data'], errors='coerce')
+                        df_limpo = df_limpo.sort_values(by='data', ascending=False)
+
+                    qtd_limpa = len(df_limpo)
+                    removidos = qtd_bruta - qtd_limpa
+
+                    # 5. Salva na nuvem (apenas se tiver dados)
+                    if not df_limpo.empty:
+                        salvar_historico(df_limpo, prefixo)
+                        st.success("✅ Histórico Restaurado e Salvo no Google Sheets!")
+                        st.metric("Linhas Totais (Juntas)", qtd_bruta)
+                        st.metric("Duplicatas Removidas", removidos, delta_color="inverse")
+                        st.metric("Linhas Finais (Salvas)", qtd_limpa)
+                        if removidos > 0: st.balloons()
+                    else:
+                        st.warning("O arquivo resultante está vazio.")
+                else:
+                    st.error("As planilhas não têm as colunas padrão (data, produto, qtd). Verifique os arquivos.")
