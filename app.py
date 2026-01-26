@@ -31,11 +31,12 @@ def conectar_google_sheets():
     return client.open("Sistema_Estoque_Database")
 
 # Cache de 60 segundos para evitar ler a mesma coisa toda hora (Economiza Cota)
+# --- VERSÃO BLINDADA CONTRA ERRO DE COLUNAS DUPLICADAS/VAZIAS ---
 @st.cache_data(ttl=60) 
 def carregar_do_google(nome_aba):
     """Lê uma aba específica da planilha e transforma em DataFrame (Com Cache)."""
     try:
-        # --- CORREÇÃO CIRÚRGICA 2: Usa a conexão já aberta (Cache) para evitar travamento ---
+        # Usa a conexão já aberta (Cache) para evitar travamento
         sh = conectar_google_sheets()
 
         try:
@@ -48,7 +49,31 @@ def carregar_do_google(nome_aba):
             return pd.DataFrame()
             
         headers = dados.pop(0)
-        df = pd.DataFrame(dados, columns=headers)
+        
+        # --- BLINDAGEM CIRÚRGICA (RESOLVE O ERRO DuplicateError) ---
+        # Se houver colunas sem título ou com títulos iguais, o sistema renomeia
+        # automaticamente em vez de travar.
+        headers_unicos = []
+        vistos = set()
+        for i, col in enumerate(headers):
+            nome_limpo = str(col).strip()
+            
+            # Se o título estiver vazio (comum em erros de copiar/colar), dá um nome genérico
+            if not nome_limpo:
+                nome_limpo = f"coluna_extra_{i}"
+            
+            nome_final = nome_limpo
+            contador = 1
+            # Se o nome já existe, adiciona um número para diferenciar
+            while nome_final in vistos:
+                nome_final = f"{nome_limpo}_{contador}"
+                contador += 1
+            
+            vistos.add(nome_final)
+            headers_unicos.append(nome_final)
+        # -----------------------------------------------------------
+
+        df = pd.DataFrame(dados, columns=headers_unicos)
         return df
     except Exception as e:
         return pd.DataFrame()
@@ -301,7 +326,7 @@ def salvar_ids_processados(prefixo, novos_ids):
 
 # --- 🏡 ATUALIZAÇÃO DE CASA GLOBAL (AGORA EM LOTE) ---
 def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, nova_validade, prefixo_ignorar):
-    """Atualiza 1 produto in todas as lojas (Modo Antigo)."""
+    """Atualiza 1 produto em todas as lojas (Modo Antigo)."""
     todas_lojas = ["loja1", "loja2", "loja3"]
     for loja in todas_lojas:
         if loja == prefixo_ignorar: continue
