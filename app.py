@@ -307,7 +307,7 @@ def salvar_ids_processados(prefixo, novos_ids):
 
 # --- 🏡 ATUALIZAÇÃO DE CASA GLOBAL (AGORA EM LOTE) ---
 def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, nova_validade, prefixo_ignorar):
-    """Atualiza 1 produto em todas as lojas (Modo Antigo)."""
+    """Atualiza 1 produto in todas as lojas (Modo Antigo)."""
     todas_lojas = ["loja1", "loja2", "loja3"]
     for loja in todas_lojas:
         if loja == prefixo_ignorar: continue
@@ -1368,7 +1368,8 @@ if df is not None:
                     df_show = filtrar_dados_inteligente(df, 'nome do produto', busca_central)
                     for idx, row in df_show.iterrows():
                         with st.container(border=True):
-                            st.write(f"📝 {row['código_barras']} | **{row['nome do produto']}**")
+                            # --- CORREÇÃO DO ERRO AQUI: Mudado de 'código_barras' para 'código de barras' ---
+                            st.write(f"📝 {row['código de barras']} | **{row['nome do produto']}**")
                             col1, col2 = st.columns(2)
                             nova_qtd = col1.number_input(f"Qtd Casa:", value=int(row['qtd_central']), key=f"q_{idx}")
                             novo_custo = col2.number_input(f"Custo:", value=float(row['preco_custo']), key=f"c_{idx}")
@@ -1661,4 +1662,3 @@ if df is not None:
                         st.warning("O arquivo resultante está vazio.")
                 else:
                     st.error("As planilhas não têm as colunas padrão (data, produto, qtd). Verifique os arquivos.")
-
