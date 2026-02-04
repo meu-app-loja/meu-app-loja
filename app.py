@@ -1662,3 +1662,4 @@ if df is not None:
                         st.warning("O arquivo resultante está vazio.")
                 else:
                     st.error("As planilhas não têm as colunas padrão (data, produto, qtd). Verifique os arquivos.")
+
