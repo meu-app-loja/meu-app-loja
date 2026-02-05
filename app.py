@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 import unicodedata
 from io import BytesIO
 import zipfile
+import re
 
 # --- NOVO: Biblioteca para gráficos bonitos e interativos ---
 import plotly.express as px 
@@ -101,7 +102,7 @@ def salvar_no_google(df, nome_aba, permitir_vazio=False):
         worksheet.clear()
         if dados_lista:
             worksheet.update(dados_lista)
-            time.sleep(2)
+            time.sleep(0.5)
         
     except Exception as e:
         st.error(f"ERRO DE CONEXÃO AO SALVAR ({nome_aba}): {e}. Tente novamente em alguns segundos.")
@@ -121,6 +122,38 @@ def normalizar_texto(texto):
 def normalizar_para_busca(texto):
     if not isinstance(texto, str): return ""
     return normalizar_texto(texto)
+
+
+def br_to_float(valor, default=0.0):
+    """Converte números vindos de Excel/CSV em float, aceitando formatos pt-BR e en-US.
+    Exemplos aceitos: 3,19 | 3.19 | 3.190,00 | 3,190.00 | 'R$ 3,19' | vazio.
+    """
+    try:
+        if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+            return default
+        if isinstance(valor, (int, float)):
+            return float(valor)
+        s = str(valor).strip()
+        if s == "" or s.lower() in {"nan", "none", "null"}:
+            return default
+        # remove símbolos comuns
+        s = s.replace("R$", "").replace(" ", "")
+        # decide separadores
+        if "," in s and "." in s:
+            # Heurística: o último separador costuma ser o decimal
+            if s.rfind(",") > s.rfind("."):
+                # 1.234,56 -> 1234.56
+                s = s.replace(".", "").replace(",", ".")
+            else:
+                # 1,234.56 -> 1234.56
+                s = s.replace(",", "")
+        elif "," in s:
+            s = s.replace(".", "").replace(",", ".") if s.count(",") == 1 and s.count(".") >= 1 else s.replace(",", ".")
+        # elimina qualquer caractere não numérico (exceto . e -)
+        s = re.sub(r"[^0-9\.-]", "", s)
+        return float(s) if s not in {"", "-", ".", "-."} else default
+    except Exception:
+        return default
 
 def calcular_pontuacao(nome_xml, nome_sistema):
     set_xml = set(normalizar_para_busca(nome_xml).split())
@@ -153,8 +186,7 @@ def unificar_produtos_por_codigo(df):
     cols_num = ['qtd.estoque', 'qtd_central', 'qtd_minima', 'qtd_comprada', 'preco_custo', 'preco_venda', 'preco_sem_desconto']
     for col in cols_num:
         if col in df.columns:
-            df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            df[col] = df[col].apply(lambda x: br_to_float(x, default=0.0))
 
     lista_final = []
     sem_codigo = df[df['código de barras'] == ""]
@@ -355,6 +387,7 @@ def atualizar_casa_global_em_lote(lista_atualizacoes, prefixo_origem):
                     df_outra.at[idx, 'qtd_central'] = dados['qtd_central']
                     if dados.get('custo') is not None: df_outra.at[idx, 'preco_custo'] = dados['custo']
                     if dados.get('venda') is not None: df_outra.at[idx, 'preco_venda'] = dados['venda']
+                    if dados.get('validade') is not None: df_outra.at[idx, 'validade'] = dados['validade']
                     
                     alterou_algo = True
                     logs_loja_outra.append({
@@ -392,8 +425,7 @@ def carregar_dados(prefixo_arquivo):
         cols_num = ['qtd.estoque', 'qtd_central', 'qtd_minima', 'qtd_comprada', 'preco_custo', 'preco_venda', 'preco_sem_desconto']
         for col in cols_num:
             if col in df.columns: 
-                df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+                df[col] = df[col].apply(lambda x: br_to_float(x, default=0.0))
         df['ultimo_fornecedor'] = df['ultimo_fornecedor'].fillna('')
         df['código de barras'] = df['código de barras'].apply(lambda x: str(x).replace('.0', '').strip() if pd.notnull(x) else "")
         df['nome do produto'] = df['nome do produto'].apply(lambda x: normalizar_texto(str(x)))
@@ -414,8 +446,7 @@ def carregar_historico(prefixo_arquivo):
         cols_num = ['qtd', 'preco_pago', 'total_gasto', 'desconto_total_money', 'preco_sem_desconto']
         for c in cols_num:
              if c in df_h.columns: 
-                 df_h[c] = df_h[c].astype(str).str.replace(',', '.', regex=False)
-                 df_h[c] = pd.to_numeric(df_h[c], errors='coerce').fillna(0)
+                 df_h[c] = df_h[c].apply(lambda x: br_to_float(x, default=0.0))
         if 'numero_nota' not in df_h.columns: df_h['numero_nota'] = ""
         if 'obs_importacao' not in df_h.columns: df_h['obs_importacao'] = ""
         if 'data_emissao' not in df_h.columns: df_h['data_emissao'] = ""
@@ -545,7 +576,10 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
     return dados_nota
 
 # --- SALVAMENTO ---
-def salvar_estoque(df, prefixo): salvar_no_google(df, f"{prefixo}_estoque")
+def salvar_estoque(df, prefixo):
+    # Mantém o DataFrame em memória sincronizado com o que foi salvo
+    st.session_state['df_ativo'] = df
+    salvar_no_google(df, f"{prefixo}_estoque")
 def salvar_historico(df, prefixo): salvar_no_google(df, f"{prefixo}_historico_compras")
 def salvar_movimentacoes(df, prefixo): salvar_no_google(df, f"{prefixo}_movimentacoes")
 def salvar_vendas(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas")
@@ -1656,11 +1690,12 @@ if df is not None:
                         st.metric("Duplicatas Removidas", removidos, delta_color="inverse")
                         st.metric("Linhas Finais", qtd_limpa)
                         if removidos > 0: st.balloons()
-                        time.sleep(2)
+                        time.sleep(0.5)
                         st.rerun()
                     else:
                         st.warning("O arquivo resultante está vazio.")
                 else:
                     st.error("As planilhas não têm as colunas padrão (data, produto, qtd). Verifique os arquivos.")
+
 
 
