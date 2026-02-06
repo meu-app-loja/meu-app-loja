@@ -124,6 +124,81 @@ def normalizar_para_busca(texto):
     return normalizar_texto(texto)
 
 
+def filtrar_df_busca_robusta(df, query, cols_text=None, cols_barcode=None):
+    """Filtro de busca robusto:
+    - Aceita múltiplas palavras (todas precisam bater)
+    - Normaliza acentos/caixa
+    - Se o usuário digitar 4+ dígitos, também procura como substring em códigos de barras
+    """
+    try:
+        if df is None or len(df) == 0:
+            return df
+        if query is None:
+            return df
+        q_raw = str(query).strip()
+        if not q_raw:
+            return df
+
+        cols_text = cols_text or []
+        cols_barcode = cols_barcode or []
+
+        # garante colunas existentes
+        cols_text = [c for c in cols_text if c in df.columns]
+        cols_barcode = [c for c in cols_barcode if c in df.columns]
+
+        # série base (texto concatenado)
+        base_parts = []
+        for c in cols_text:
+            s = df[c].fillna("").astype(str).map(normalizar_para_busca)
+            base_parts.append(s)
+        if base_parts:
+            base = base_parts[0]
+            for s in base_parts[1:]:
+                base = base + " | " + s
+        else:
+            base = pd.Series([""] * len(df), index=df.index)
+
+        # prepara barras (somente dígitos)
+        barras = None
+        if cols_barcode:
+            bparts = []
+            for c in cols_barcode:
+                b = df[c].fillna("").astype(str).str.replace(r"\D", "", regex=True)
+                bparts.append(b)
+            barras = bparts[0]
+            for b in bparts[1:]:
+                barras = barras + " | " + b
+
+        # tokens normalizados
+        q_norm = normalizar_para_busca(q_raw)
+        tokens = [t for t in re.split(r"\s+", q_norm) if t]
+
+        mask = pd.Series(True, index=df.index)
+        for t in tokens:
+            if t.isdigit() and len(t) >= 4:
+                m_bar = pd.Series(False, index=df.index)
+                if barras is not None:
+                    m_bar = barras.str.contains(t, na=False)
+                m_txt = base.str.contains(t, na=False)
+                mask = mask & (m_bar | m_txt)
+            else:
+                mask = mask & base.str.contains(t, na=False)
+
+        return df.loc[mask].copy()
+    except Exception:
+        # em caso de qualquer erro de parsing/busca, não quebra a tela: retorna df original
+        return df
+
+
+
+def limpar_codigo_barras(valor):
+    """Converte código de barras para string apenas com dígitos."""
+    try:
+        s = "" if valor is None else str(valor)
+        return re.sub(r"\D", "", s)
+    except Exception:
+        return ""
+
 def pick_col(colunas, *candidatos):
     """Escolhe a coluna mais provável com base em normalização (acentos/pontuação) e match por contém."""
     if colunas is None:
@@ -346,11 +421,25 @@ def formatar_moeda_br(valor):
     except: return f"{valor:.2f}"
 
 def filtrar_dados_inteligente(df, coluna_busca, texto_busca):
-    if not texto_busca: return df
-    mask = df[coluna_busca].astype(str).apply(lambda x: normalizar_para_busca(texto_busca) in normalizar_para_busca(x))
-    return df[mask]
-
-
+    """Mantido por compatibilidade: agora usa busca robusta.
+    Procura por nome e (se existir) por código de barras com 4+ dígitos.
+    """
+    try:
+        if df is None or len(df) == 0:
+            return df
+        cols_barcode_candidatas = [
+            'código de barras','codigo de barras','código_barras','codigo_barras',
+            'barcode','ean','ean13','gtin','gtin13','código barras','codigo barras'
+        ]
+        cols_barcode = [c for c in cols_barcode_candidatas if c in df.columns]
+        cols_text = [coluna_busca] if coluna_busca in df.columns else []
+        # também tenta incluir 'produto' ou 'nome do produto' se existirem
+        for extra in ['produto', 'nome do produto', 'nome_produto', 'descricao', 'descrição']:
+            if extra in df.columns and extra not in cols_text:
+                cols_text.append(extra)
+        return filtrar_df_busca_robusta(df, texto_busca, cols_text=cols_text, cols_barcode=cols_barcode)
+    except Exception:
+        return df
 
 # ==============================================================================
 # 🛡️ BLINDAGEM: conversão numérica pt-BR + clamp de negativos (regra de ouro)
@@ -1642,14 +1731,111 @@ if df is not None:
 
                             topA = df_rank[df_rank['classe']=='A']
                             st.metric("Produtos Classe A (≈80% do valor)", len(topA))
-                            st.dataframe(df_rank.head(30), use_container_width=True, hide_index=True)
+
+                            st.markdown("#### 🔎 Buscar no ranking (nome ou código de barras)")
+                            busca_rank = st.text_input("Digite parte do nome ou 4+ dígitos do código de barras", key="busca_rank_8020")
+                            df_rank_f = filtrar_df_busca_robusta(df_rank, busca_rank, cols_text=['produto'], cols_barcode=['código_barras'])
+
+                            # rótulo com nome + código para não haver dúvida
+                            df_rank_f = df_rank_f.copy()
+                            df_rank_f['código_barras'] = df_rank_f['código_barras'].map(limpar_codigo_barras)
+                            df_rank_f['produto_label'] = df_rank_f.apply(
+                                lambda r: f"{r.get('produto','')} [{r.get('código_barras','')}]" if r.get('código_barras','') else str(r.get('produto','')),
+                                axis=1
+                            )
+
+                            st.markdown("#### 📌 Top 15 por valor (didático)")
+                            df_top = df_rank_f.head(15).copy()
+                            fig_top = px.bar(
+                                df_top.sort_values('valor_total', ascending=True),
+                                x='valor_total',
+                                y='produto_label',
+                                orientation='h',
+                                title='Top 15 (valor total) – nome + código de barras'
+                            )
+                            fig_top.update_layout(xaxis_title='R$ (valor total)', yaxis_title='Produto')
+                            st.plotly_chart(fig_top, use_container_width=True)
+
+                            st.markdown("#### 📋 Tabela (Top 30)")
+                            df_show = df_rank_f.head(30).copy()
+                            if 'pct' in df_show.columns:
+                                df_show['pct_fmt'] = df_show['pct'].map(lambda v: "—" if pd.isna(v) else f"{(v*100):.1f}%")
+                            else:
+                                df_show['pct_fmt'] = "—"
+                            if 'pct_acumulado' in df_show.columns:
+                                df_show['pct_acum_fmt'] = df_show['pct_acumulado'].map(lambda v: "—" if pd.isna(v) else f"{(v*100):.1f}%")
+                            else:
+                                df_show['pct_acum_fmt'] = "—"
+
+                            cols = [c for c in ['classe','produto','código_barras','valor_total','qtd_vendida','pct_fmt','pct_acum_fmt'] if c in df_show.columns]
+                            df_show['código_barras'] = df_show['código_barras'].map(limpar_codigo_barras)
+                            if 'valor_total' in df_show.columns:
+                                df_show['valor_total_fmt'] = df_show['valor_total'].map(lambda v: f"R$ {formatar_moeda_br(v)}")
+                                cols = [c if c!='valor_total' else 'valor_total_fmt' for c in cols]
+                            st.dataframe(
+                                df_show[cols].rename(columns={'pct_fmt':'pct (%)','pct_acum_fmt':'pct acumulado (%)','valor_total_fmt':'valor total'}),
+                                use_container_width=True,
+                                hide_index=True
+                            )
 
                             st.markdown("### 📈 Comparar Vendas por Mês")
-                            df_mes = df_periodo.groupby('mes_ref').agg(valor_total=('valor_total','sum'), qtd_vendida=('qtd_vendida','sum')).reset_index().sort_values('mes_ref')
-                            fig = px.line(df_mes, x='mes_ref', y='valor_total', markers=True, title="Valor Total Vendido por Mês")
-                            st.plotly_chart(fig, use_container_width=True)
-                            fig2 = px.line(df_mes, x='mes_ref', y='qtd_vendida', markers=True, title="Quantidade Vendida por Mês")
+                            df_mes = (
+                                df_periodo.groupby('mes_ref')
+                                .agg(valor_total=('valor_total','sum'), qtd_vendida=('qtd_vendida','sum'))
+                                .reset_index()
+                            )
+                            df_mes['mes_ref'] = df_mes['mes_ref'].astype(str)
+                            df_mes = df_mes.sort_values('mes_ref')
+
+                            # Variação mês a mês (pct = percentual)
+                            df_mes['var_pct_valor'] = df_mes['valor_total'].pct_change() * 100
+                            df_mes['var_pct_qtd'] = df_mes['qtd_vendida'].pct_change() * 100
+
+                            st.markdown("### 📊 Comparar Vendas por Mês")
+
+                            c1, c2, c3 = st.columns(3)
+                            c1.metric("Total vendido (período)", f"R$ {formatar_moeda_br(df_mes['valor_total'].sum())}")
+                            c2.metric("Qtd. vendida (período)", f"{int(df_mes['qtd_vendida'].sum())}")
+                            ticket = (df_mes['valor_total'].sum() / df_mes['qtd_vendida'].sum()) if df_mes['qtd_vendida'].sum() else 0
+                            c3.metric("Ticket médio (R$/item)", f"R$ {formatar_moeda_br(ticket)}")
+
+                            # Gráfico 1: Total vendido por mês (barras, mais legível)
+                            fig1 = px.bar(
+                                df_mes,
+                                x='mes_ref',
+                                y='valor_total',
+                                text=df_mes['valor_total'].round(2),
+                                title='Valor total vendido por mês'
+                            )
+                            fig1.update_traces(textposition='outside')
+                            fig1.update_layout(xaxis_title='Mês (YYYY-MM)', yaxis_title='R$ (total)')
+                            st.plotly_chart(fig1, use_container_width=True)
+
+                            # Gráfico 2: Quantidade vendida por mês (barras)
+                            fig2 = px.bar(
+                                df_mes,
+                                x='mes_ref',
+                                y='qtd_vendida',
+                                text=df_mes['qtd_vendida'].astype(int),
+                                title='Quantidade vendida por mês'
+                            )
+                            fig2.update_traces(textposition='outside')
+                            fig2.update_layout(xaxis_title='Mês (YYYY-MM)', yaxis_title='Quantidade')
                             st.plotly_chart(fig2, use_container_width=True)
+
+                            # Tabela auxiliar (didática)
+                            df_vis = df_mes.copy()
+                            df_vis['valor_total'] = df_vis['valor_total'].map(lambda v: float(v) if pd.notna(v) else 0.0)
+                            df_vis['valor_total_fmt'] = df_vis['valor_total'].map(lambda v: f"R$ {formatar_moeda_br(v)}")
+                            df_vis['var_pct_valor_fmt'] = df_vis['var_pct_valor'].map(lambda v: "—" if pd.isna(v) else f"{v:.1f}%")
+                            df_vis['var_pct_qtd_fmt'] = df_vis['var_pct_qtd'].map(lambda v: "—" if pd.isna(v) else f"{v:.1f}%")
+                            st.dataframe(
+                                df_vis[['mes_ref','valor_total_fmt','qtd_vendida','var_pct_valor_fmt','var_pct_qtd_fmt']]
+                                .rename(columns={'mes_ref':'mês','valor_total_fmt':'total vendido','qtd_vendida':'qtd vendida','var_pct_valor_fmt':'Δ% total','var_pct_qtd_fmt':'Δ% qtd'}),
+                                use_container_width=True,
+                                height=220
+                            )
+
 
         # =========================
         # 🚦 MIX REVIEW (SEM GIRO)
