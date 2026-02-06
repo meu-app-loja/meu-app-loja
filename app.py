@@ -123,6 +123,43 @@ def normalizar_para_busca(texto):
     if not isinstance(texto, str): return ""
     return normalizar_texto(texto)
 
+
+def ler_excel_com_header_auto(file_obj, max_rows=25):
+    """Lê Excel tentando detectar automaticamente a linha de cabeçalho.
+    Retorna (df, header_row_detected, cols_detectadas)."""
+    # Streamlit UploadedFile costuma ser BytesIO; precisamos resetar o ponteiro entre leituras
+    try:
+        file_obj.seek(0)
+    except Exception:
+        pass
+
+    amostra = pd.read_excel(file_obj, header=None, nrows=max_rows)
+    chaves = ["PRODUTO", "ITEM", "DESCRICAO", "QTD", "QUANTIDADE", "TRANSACAO", "ID", "DATA", "LOJA"]
+
+    melhor_linha = None
+    melhor_score = -1
+
+    for r in range(min(len(amostra), max_rows)):
+        row_vals = [str(x) for x in amostra.iloc[r].tolist()]
+        row_norm = [normalizar_para_busca(v) for v in row_vals]
+        joined = " | ".join(row_norm)
+        score = sum(1 for k in chaves if k in joined)
+        nonempty = sum(1 for v in row_norm if v.strip() != "")
+        if nonempty >= 2 and score > melhor_score:
+            melhor_score = score
+            melhor_linha = r
+
+    header_row = melhor_linha if (melhor_linha is not None and melhor_score >= 2) else 0
+
+    try:
+        file_obj.seek(0)
+    except Exception:
+        pass
+
+    df = pd.read_excel(file_obj, header=header_row).dropna(axis=1, how="all")
+    cols = list(df.columns)
+    return df, header_row, cols
+
 def calcular_pontuacao(nome_xml, nome_sistema):
     set_xml = set(normalizar_para_busca(nome_xml).split())
     set_sis = set(normalizar_para_busca(nome_sistema).split())
@@ -763,7 +800,6 @@ if df is not None:
         "⚙️ Configurar Base Oficial",
         "🔄 Sincronizar (Planograma)",
         "📈 Vendas (Importar & 80/20)",
-        "📈 Análise de Vendas (80/20 & Mix)",
         "🏠 Gôndola (Loja)", 
         "💰 Inteligência de Compras (Histórico)",
         "🏡 Estoque Central (Casa)",
@@ -1271,14 +1307,26 @@ if df is not None:
                 lista_nomes = df_ref['nome do produto'].astype(str).tolist()
 
                 def detectar_tipo(cols):
-                    cols_norm = [str(c).strip().lower() for c in cols]
-                    if ('transação' in cols_norm or 'transacao' in cols_norm) and ('hora da venda' in cols_norm or 'hora' in cols_norm):
+                    """Detecta automaticamente o tipo do relatório do Shoppbud baseado no cabeçalho."""
+                    cols_norm = [normalizar_para_busca(str(c)) for c in cols if str(c).strip() != ""]
+                    joined = " | ".join(cols_norm)
+                
+                    def has_any(*terms):
+                        return any(t in joined for t in terms)
+                
+                    tem_id_transacao = has_any("ID DA TRANSACAO", "ID TRANSACAO", "TRANSACAO", "ID DO PEDIDO", "PEDIDO")
+                    tem_produto = has_any("PRODUTO", "ITEM", "DESCRICAO")
+                    tem_qtd = has_any("QTD", "QUANTIDADE")
+                    tem_valor = has_any("TOTAL", "VALOR", "SUBTOTAL", "RECEITA", "PAGAMENTO")
+                
+                    # Itens vendidos (por produto / por transação com itens) — dá baixa no estoque e alimenta 80/20
+                    if tem_produto and tem_qtd:
+                        return "itens"
+                
+                    # Resumo por transação (financeiro) — alimenta comparação de meses e total vendido
+                    if tem_id_transacao and tem_valor:
                         return "transacoes"
-                    if ('código de barras' in cols_norm or 'codigo de barras' in cols_norm or 'ean' in cols_norm) and ('quantidade' in cols_norm):
-                        return "itens"
-                    # fallback: se tiver produto e quantidade, tratamos como itens
-                    if ('produto' in cols_norm or 'nome do produto' in cols_norm) and ('quantidade' in cols_norm):
-                        return "itens"
+                
                     return "desconhecido"
 
                 def mes_ref_from_dt(dt_val):
@@ -1291,7 +1339,7 @@ if df is not None:
 
                 for arq in arquivos:
                     try:
-                        df_raw = pd.read_excel(arq)
+                        df_raw, header_row_detected, cols_detectadas = ler_excel_com_header_auto(arq)
                         if df_raw.empty:
                             continue
                         tipo = detectar_tipo(df_raw.columns)
@@ -1407,13 +1455,22 @@ if df is not None:
                         # TRANSAÇÕES (financeiro)
                         # -------------------------
                         elif tipo == "transacoes":
-                            cols_lower = {str(c).strip().lower(): c for c in df_raw.columns}
-                            col_trans = cols_lower.get('transação') or cols_lower.get('transacao')
-                            col_hora = cols_lower.get('hora da venda') or cols_lower.get('hora')
-                            col_sub = cols_lower.get('subtotal')
-                            col_desc = cols_lower.get('descontos')
-                            col_tax = cols_lower.get('taxa de processamento') or cols_lower.get('taxas') or cols_lower.get('taxa')
-                            col_tot = cols_lower.get('total')
+                            cols = [str(c) for c in df_raw.columns]
+                            cols_norm = {c: normalizar_para_busca(c) for c in cols}
+                            
+                            def pick(keywords):
+                                for c in cols:
+                                    cn = cols_norm.get(c, "")
+                                    if any(k in cn for k in keywords):
+                                        return c
+                                return None
+                            
+                            col_trans = pick(["ID DA TRANSACAO", "ID TRANSACAO", "TRANSACAO", "ID DO PEDIDO", "PEDIDO"])
+                            col_hora  = pick(["HORA DA VENDA", "DATA/HORA", "DATA HORA", "DATA"])
+                            col_sub   = pick(["SUBTOTAL DE ITENS", "SUBTOTAL", "ITENS"])
+                            col_desc  = pick(["DESCONTO", "DESCONTOS"])
+                            col_tax   = pick(["TAXA", "TAXAS"])
+                            col_tot   = pick(["TOTAL", "VALOR TOTAL"])
 
                             for _, r in df_raw.iterrows():
                                 transacao = str(r.get(col_trans, "")).strip() if col_trans else ""
