@@ -124,6 +124,29 @@ def normalizar_para_busca(texto):
     return normalizar_texto(texto)
 
 
+def pick_col(colunas, *candidatos):
+    """Escolhe a coluna mais provável com base em normalização (acentos/pontuação) e match por contém."""
+    if colunas is None:
+        return None
+    cols = list(colunas)
+    norm_map = {c: normalizar_para_busca(str(c)) for c in cols}
+    cand_norm = [normalizar_para_busca(str(x)) for x in candidatos if x is not None and str(x).strip()!=""]
+    # 1) match exato
+    for c in cols:
+        nc = norm_map[c]
+        for cn in cand_norm:
+            if cn and nc == cn:
+                return c
+    # 2) contém (token)
+    for c in cols:
+        nc = norm_map[c]
+        for cn in cand_norm:
+            if cn and cn in nc:
+                return c
+    return None
+
+
+
 def ler_excel_com_header_auto(file_obj, max_rows=25):
     """Lê Excel tentando detectar automaticamente a linha de cabeçalho.
     Retorna (df, header_row_detected, cols_detectadas)."""
@@ -1306,27 +1329,47 @@ if df is not None:
                 map_cod_to_idx = {str(r['código de barras']).strip(): i for i, r in df_ref.reset_index().iterrows()}
                 lista_nomes = df_ref['nome do produto'].astype(str).tolist()
 
-                def detectar_tipo(cols):
-                    """Detecta automaticamente o tipo do relatório do Shoppbud baseado no cabeçalho."""
-                    cols_norm = [normalizar_para_busca(str(c)) for c in cols if str(c).strip() != ""]
+                def detectar_tipo(cols, nome_arquivo: str = ""):
+                    """Retorna 'itens', 'transacoes' ou 'desconhecido'.
+
+                    - 'itens': relatório por item/produto (tem PRODUTO + QTD)
+                    - 'transacoes': relatório por transação (tem SUBTOTAL/TOTAL + ID TRANSACAO)
+
+                    Observação: alguns arquivos do Shoppbud mudam o cabeçalho. Esta função tolera variações.
+                    """
+                    cols_norm = [normalizar_para_busca(c) for c in cols if c is not None]
                     joined = " | ".join(cols_norm)
-                
-                    def has_any(*terms):
-                        return any(t in joined for t in terms)
-                
-                    tem_id_transacao = has_any("ID DA TRANSACAO", "ID TRANSACAO", "TRANSACAO", "ID DO PEDIDO", "PEDIDO")
-                    tem_produto = has_any("PRODUTO", "ITEM", "DESCRICAO")
-                    tem_qtd = has_any("QTD", "QUANTIDADE")
-                    tem_valor = has_any("TOTAL", "VALOR", "SUBTOTAL", "RECEITA", "PAGAMENTO")
-                
-                    # Itens vendidos (por produto / por transação com itens) — dá baixa no estoque e alimenta 80/20
+
+                    # Heurística por nome do arquivo (último recurso)
+                    nome_norm = normalizar_para_busca(nome_arquivo or "")
+                    if "SALES-BY-TRANSACTION" in nome_norm or "BY-TRANSACTION" in nome_norm:
+                        # mesmo se o cabeçalho vier estranho, a intenção do usuário pode estar clara
+                        return "transacoes"
+                    if nome_norm.startswith("SALES-") and "BY-TRANSACTION" not in nome_norm and "SALES BY TRANSACTION" not in nome_norm:
+                        # geralmente é o relatório de itens
+                        return "itens"
+
+                    tem_produto = any(("PRODUTO" in c) or ("ITEM" == c) for c in cols_norm)
+                    tem_qtd = any(("QTD" in c) or ("QUANT" in c) for c in cols_norm)
+                    tem_id_trans = any(("ID" in c and "TRANS" in c) or ("TRANSACAO" in c) for c in cols_norm)
+
+                    # Itens/produtos
                     if tem_produto and tem_qtd:
                         return "itens"
-                
-                    # Resumo por transação (financeiro) — alimenta comparação de meses e total vendido
-                    if tem_id_transacao and tem_valor:
+
+                    # Transações (financeiro)
+                    tem_subtotal = any("SUBTOTAL" in c for c in cols_norm)
+                    tem_total = any((c == "TOTAL") or ("VALOR TOTAL" in c) or ("TOTAL" in c and "VALOR" in c) for c in cols_norm)
+                    tem_taxa = any(("TAXA" in c) or ("TAXAS" in c) for c in cols_norm)
+                    tem_desc = any(("DESC" in c) or ("DESCONTO" in c) for c in cols_norm)
+                    if tem_id_trans and (tem_subtotal or tem_total or tem_taxa or tem_desc):
                         return "transacoes"
-                
+
+                    # fallback: se tem ID transação + data, provavelmente é transações
+                    tem_data = any("DATA" == c or "DATA" in c for c in cols_norm)
+                    if tem_id_trans and tem_data:
+                        return "transacoes"
+
                     return "desconhecido"
 
                 def mes_ref_from_dt(dt_val):
@@ -1348,15 +1391,14 @@ if df is not None:
                         # ITENS (por produto)
                         # -------------------------
                         if tipo == "itens":
-                            cols_lower = {str(c).strip().lower(): c for c in df_raw.columns}
-
-                            col_cod = cols_lower.get('código de barras') or cols_lower.get('codigo de barras') or cols_lower.get('ean')
-                            col_nome = cols_lower.get('produto') or cols_lower.get('nome do produto') or cols_lower.get('item')
-                            col_qtd = cols_lower.get('quantidade') or cols_lower.get('qtd')
-                            col_val_total = cols_lower.get('valor total') or cols_lower.get('total') or cols_lower.get('valor')
-                            col_data = cols_lower.get('data') or cols_lower.get('data da venda')
-                            col_hora = cols_lower.get('hora') or cols_lower.get('hora da venda')
-                            col_trans = cols_lower.get('transação') or cols_lower.get('transacao')
+                            # Mapeamento robusto de colunas (acentos/pontos/variações do Shoppbud)
+                            col_cod = pick_col(df_raw.columns, 'código de barras', 'codigo de barras', 'ean', 'gtin', 'codbarras', 'código barras')
+                            col_nome = pick_col(df_raw.columns, 'produto', 'nome do produto', 'item', 'descrição', 'descricao')
+                            col_qtd = pick_col(df_raw.columns, 'qtd', 'qtd.', 'quantidade', 'qtd vendida', 'qtde', 'qte')
+                            col_val_total = pick_col(df_raw.columns, 'valor total', 'total', 'valor', 'venda', 'valor venda')
+                            col_data = pick_col(df_raw.columns, 'data', 'data da venda', 'data/hora', 'data hora', 'data_hora')
+                            col_hora = pick_col(df_raw.columns, 'hora', 'hora da venda')
+                            col_trans = pick_col(df_raw.columns, 'id da transação', 'id da transacao', 'transação', 'transacao', 'id transacao', 'id_transacao')
 
                             for _, r in df_raw.iterrows():
                                 qtd = parse_num_br(r.get(col_qtd, 0), default=0)
@@ -1491,7 +1533,16 @@ if df is not None:
                                 })
                                 total_linhas += 1
                         else:
-                            st.warning(f"⚠️ Não consegui identificar o tipo do arquivo: {arq.name}. Verifique o cabeçalho.")
+                            st.warning(f"⚠️ Não consegui identificar o tipo do arquivo: {arq.name}.")
+                            st.caption("Dica: o app reconhece 2 formatos do Shoppbud: (1) **Sales (itens/produtos)** e (2) **Sales by Transaction (transações)**. "
+                                       "Se o arquivo tiver linhas de título acima do cabeçalho, confira se a exportação veio sem linhas extras. "
+                                       "Abaixo estão as primeiras colunas lidas para ajudar a diagnosticar.")
+                            try:
+                                st.write("Colunas lidas (parcial):", list(df.columns)[:30])
+                            except Exception:
+                                pass
+                            st.info("Para **80/20** e **Mix (sem giro)** o app precisa do arquivo **Sales (itens/produtos)**. "
+                                    "O arquivo **Sales by Transaction** sozinho não tem a lista de produtos vendida (apenas totais por transação).")
                     except Exception as e:
                         st.error(f"Erro ao processar {arq.name}: {e}")
 
@@ -1519,8 +1570,9 @@ if df is not None:
                         df_all = pd.concat([df_vt, df_new], ignore_index=True)
                     else:
                         df_all = df_new
-                    cols_dedup = [c for c in ['transacao','data_hora','total'] if c in df_all.columns]
+                    cols_dedup = [c for c in ['transacao'] if c in df_all.columns]
                     if cols_dedup:
+                        df_all['transacao'] = df_all['transacao'].astype(str)
                         df_all = df_all.drop_duplicates(subset=cols_dedup, keep='last')
                     salvar_vendas_transacoes(df_all, prefixo)
 
@@ -1550,7 +1602,7 @@ if df is not None:
         with tab_8020:
             df_mensal = carregar_do_google(f"{prefixo}_vendas_mensal_produto")
             if df_mensal.empty:
-                st.info("Sem dados de vendas ainda. Importe uma planilha na aba 'Importar'.")
+                st.info("Sem dados de **itens vendidos** ainda. Importe o relatório **Sales (itens/produtos)** na aba 'Importar'. Se você importou apenas **Sales by Transaction**, ele salva o financeiro, mas não alimenta 80/20/Mix.")
             else:
                 df_mensal.columns = df_mensal.columns.str.strip().str.lower()
                 for c in ['qtd_vendida','valor_total']:
@@ -1606,7 +1658,7 @@ if df is not None:
             st.subheader("🚦 Mix: produtos sem giro / menos vendidos")
             df_vi = carregar_vendas_itens(prefixo)
             if df_vi.empty:
-                st.info("Sem vendas importadas ainda.")
+                st.info("Sem dados de **itens vendidos** ainda. Importe o relatório **Sales (itens/produtos)** na aba 'Importar'.")
             else:
                 df_vi['data_hora'] = pd.to_datetime(df_vi['data_hora'], errors='coerce')
                 ultima = df_vi.groupby(['produto','código_barras'], dropna=False)['data_hora'].max().reset_index()
