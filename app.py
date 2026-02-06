@@ -1318,6 +1318,147 @@ if df is not None:
                 st.dataframe(df_vendas.sort_values(by='data_hora', ascending=False), use_container_width=True, hide_index=True)
             else:
                 st.info("Vazio.")
+    elif modo == "📈 Análise de Vendas (80/20 & Mix)":
+        st.title("📈 Análise de Vendas (80/20 & Mix)")
+        st.markdown("Use as vendas importadas em **'Baixar Vendas (Do Relatório)'** para analisar **mais vendidos, 80/20, menos vendidos e produtos sem venda**.")
+
+        df_vendas = carregar_vendas(prefixo)
+        if df_vendas.empty:
+            st.warning("Ainda não há vendas importadas para esta loja. Vá em **'Baixar Vendas (Do Relatório)'** e importe o relatório primeiro.")
+        else:
+            # Blindagem de colunas esperadas
+            if 'produto' not in df_vendas.columns:
+                st.error("A aba de vendas não tem a coluna 'produto'. Reimporte as vendas.")
+            else:
+                # Normaliza datas
+                if 'data_hora' in df_vendas.columns:
+                    df_vendas['data_hora'] = pd.to_datetime(df_vendas['data_hora'], errors='coerce')
+                else:
+                    st.error("A aba de vendas não tem a coluna 'data_hora'. Reimporte as vendas.")
+                    df_vendas = pd.DataFrame()
+
+            if not df_vendas.empty:
+                # --- Filtros de período ---
+                df_v = df_vendas.copy()
+                df_v = df_v[pd.notnull(df_v['data_hora'])].copy()
+                if df_v.empty:
+                    st.warning("As vendas importadas não têm datas válidas.")
+                else:
+                    min_dt = df_v['data_hora'].min()
+                    max_dt = df_v['data_hora'].max()
+
+                    st.markdown("### 🗓️ Período de análise")
+                    c1, c2, c3 = st.columns([1, 1, 1])
+                    with c1:
+                        dt_ini = st.date_input("De:", value=min_dt.date())
+                    with c2:
+                        dt_fim = st.date_input("Até:", value=max_dt.date())
+                    with c3:
+                        considerar_apenas_ativos = st.checkbox("Somente produtos ATIVOS", value=True)
+
+                    ini = datetime.combine(dt_ini, datetime.min.time())
+                    fim = datetime.combine(dt_fim, datetime.max.time())
+                    df_v = df_v[(df_v['data_hora'] >= ini) & (df_v['data_hora'] <= fim)].copy()
+
+                    # Sanidade: qtd_vendida
+                    if 'qtd_vendida' not in df_v.columns:
+                        st.error("A aba de vendas não tem a coluna 'qtd_vendida'. Reimporte as vendas.")
+                        df_v = pd.DataFrame()
+                    else:
+                        df_v['qtd_vendida'] = pd.to_numeric(df_v['qtd_vendida'], errors='coerce').fillna(0)
+                        df_v = df_v[df_v['qtd_vendida'] > 0]
+
+                    if df_v.empty:
+                        st.info("Não há vendas no período selecionado.")
+                    else:
+                        # --- Filtra por ativos se quiser ---
+                        df_base = df.copy()
+                        if considerar_apenas_ativos and (not df_base.empty) and ('status' in df_base.columns):
+                            ativos = set(df_base[df_base['status'] == 'Ativo']['nome do produto'].astype(str).tolist())
+                            df_v = df_v[df_v['produto'].astype(str).isin(ativos)]
+
+                        # --- Agregação ---
+                        grp = df_v.groupby('produto', as_index=False)['qtd_vendida'].sum()
+                        grp = grp.sort_values(by='qtd_vendida', ascending=False).reset_index(drop=True)
+                        total_vendido = float(grp['qtd_vendida'].sum())
+
+                        # --- 80/20 ---
+                        grp['%_do_total'] = (grp['qtd_vendida'] / total_vendido) * 100 if total_vendido > 0 else 0.0
+                        grp['%_acum'] = grp['%_do_total'].cumsum()
+                        grp['curva_abc'] = pd.cut(
+                            grp['%_acum'],
+                            bins=[-1, 80, 95, 100.000001],
+                            labels=['A (até 80%)', 'B (80-95%)', 'C (95-100%)']
+                        )
+
+                        st.markdown("### 📌 Resumo")
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("Produtos com venda", int(len(grp)))
+                        c2.metric("Qtd total vendida", int(total_vendido))
+                        c3.metric("Top 10 % do mix (qtd)", int(grp.head(max(1, int(len(grp)*0.10)))['qtd_vendida'].sum()))
+
+                        st.markdown("### 🏆 Mais vendidos (80/20 + ABC)")
+                        busca = st.text_input("🔍 Buscar produto:", placeholder="Digite parte do nome...")
+                        grp_view = grp.copy()
+                        if busca:
+                            grp_view = grp_view[grp_view['produto'].astype(str).apply(lambda x: normalizar_para_busca(busca) in normalizar_para_busca(x))]
+                        st.dataframe(grp_view.head(200), use_container_width=True, hide_index=True)
+
+                        st.markdown("### 🧊 Menos vendidos (com venda)")
+                        st.dataframe(grp.tail(200).sort_values(by='qtd_vendida', ascending=True), use_container_width=True, hide_index=True)
+
+                        # --- Produtos sem venda / venda antiga ---
+                        st.markdown("### 🕒 Produtos sem venda / venda antiga")
+                        dias_sem_vender = st.number_input("Considerar 'parado' se não vende há (dias):", min_value=1, value=60)
+
+                        # Last sale por produto
+                        last = df_vendas.copy()
+                        last['data_hora'] = pd.to_datetime(last.get('data_hora'), errors='coerce')
+                        last = last[pd.notnull(last['data_hora'])].copy()
+                        last = last.groupby('produto', as_index=False)['data_hora'].max().rename(columns={'data_hora': 'ultima_venda'})
+
+                        # Base de produtos (do estoque)
+                        base_prod = df.copy()
+                        base_prod['nome do produto'] = base_prod['nome do produto'].astype(str)
+                        base_prod = base_prod[['código de barras', 'nome do produto', 'status', 'qtd.estoque', 'qtd_central', 'preco_custo', 'preco_venda']].copy() if not base_prod.empty else pd.DataFrame(columns=['código de barras','nome do produto','status','qtd.estoque','qtd_central','preco_custo','preco_venda'])
+                        base_prod.rename(columns={'nome do produto':'produto'}, inplace=True)
+
+                        mix = pd.merge(base_prod, last, on='produto', how='left')
+                        agora = obter_hora_manaus()
+                        mix['dias_sem_vender'] = (agora - pd.to_datetime(mix['ultima_venda'], errors='coerce')).dt.days
+                        mix['dias_sem_vender'] = mix['dias_sem_vender'].fillna(999999).astype(int)
+
+                        # Vendas no período analisado
+                        vendido_periodo = grp[['produto','qtd_vendida']].copy()
+                        mix = pd.merge(mix, vendido_periodo, on='produto', how='left')
+                        mix['qtd_vendida'] = mix['qtd_vendida'].fillna(0).astype(float)
+
+                        # Candidatos a revisão
+                        cand = mix[(mix['qtd_vendida'] == 0) | (mix['dias_sem_vender'] >= int(dias_sem_vender))].copy()
+                        if considerar_apenas_ativos and 'status' in cand.columns:
+                            cand = cand[cand['status'] == 'Ativo']
+
+                        cand = cand.sort_values(by=['qtd_vendida','dias_sem_vender'], ascending=[True, False])
+
+                        st.caption("💡 'dias_sem_vender = 999999' significa que o produto nunca apareceu nas vendas importadas.")
+                        st.dataframe(
+                            cand[['código de barras','produto','status','qtd.estoque','qtd_central','qtd_vendida','dias_sem_vender','ultima_venda']].head(500),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+
+                        st.markdown("### 🧾 Gerar lista de revisão do mix (salvar na nuvem)")
+                        st.caption("Isso cria/atualiza a aba **{prefixo}_mix_review** para você decidir depois se remove do planograma ou mantém.")
+                        if st.button("💾 GERAR / ATUALIZAR LISTA DE MIX REVIEW"):
+                            aba_mix = f"{prefixo}_mix_review"
+                            df_mix = cand[['código de barras','produto','qtd.estoque','qtd_central','qtd_vendida','dias_sem_vender','ultima_venda']].copy()
+                            df_mix['decisao'] = ""  # você preenche depois
+                            df_mix['observacao'] = ""
+                            # Formata datas
+                            df_mix['ultima_venda'] = df_mix['ultima_venda'].astype(str)
+                            salvar_no_google(df_mix, aba_mix, permitir_vazio=True)
+                            st.success(f"✅ Lista salva na nuvem na aba: {aba_mix}")
+
 
     elif modo == "🏠 Gôndola (Loja)":
         st.title(f"🏠 Gôndola - {loja_atual}")
