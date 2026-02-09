@@ -904,6 +904,7 @@ if df is not None:
     st.sidebar.title("🏪 Menu")
     modo = st.sidebar.radio("Navegar:", [
         "📊 Dashboard (Visão Geral)",
+        "📦 Inventário Rápido (Lote)",
         "⚖️ Conciliação (Shoppbud vs App)",
         "🚚 Transferência em Massa (Picklist)",
         "📝 Lista de Compras (Planejamento)",
@@ -962,6 +963,130 @@ if df is not None:
                     st.success("Vencimentos atualizados na Nuvem!")
                     st.rerun()
             else: st.success("Nenhum produto vencendo nos próximos 5 dias.")
+
+    elif modo == "📦 Inventário Rápido (Lote)":
+        st.title("📦 Inventário Rápido (Modo Offline)")
+        st.info("💡 Conte tudo, adicione na lista abaixo e clique em 'PROCESSAR TUDO' apenas no final. Muito mais rápido!")
+
+        if 'lote_inventario' not in st.session_state:
+            st.session_state['lote_inventario'] = []
+
+        # 1. Busca Rápida e Inteligente
+        if not df.empty:
+            # Cria lista combo para busca (Código - Nome)
+            lista_nomes_codigos = sorted((df['código de barras'].astype(str) + " - " + df['nome do produto'].astype(str)).unique().tolist())
+            
+            st.markdown("### 1️⃣ Localizar Produto")
+            produto_busca = st.selectbox("🔍 Digite Código ou Nome:", [""] + lista_nomes_codigos, key="busca_inv_lote")
+
+            # 2. Formulário de Entrada
+            if produto_busca:
+                parts = produto_busca.split(' - ', 1)
+                cod_sel = parts[0]
+                nome_sel = parts[1]
+                
+                # Pega dados atuais para referência
+                mask = df['código de barras'] == cod_sel
+                qtd_atual = 0
+                val_atual = None
+                if mask.any():
+                    idx = df[mask].index[0]
+                    qtd_atual = int(df.at[idx, 'qtd.estoque'])
+                    val_atual = df.at[idx, 'validade']
+
+                st.markdown(f"**Produto:** {nome_sel}")
+                st.caption(f"Estoque Atual no Sistema: {qtd_atual}")
+
+                c_qtd, c_val, c_btn = st.columns([1, 1, 1])
+                with c_qtd:
+                    qtd_contada = st.number_input("Nova Qtd Real:", min_value=0, value=qtd_atual, key="qtd_inv_input")
+                with c_val:
+                    val_nova = st.date_input("Nova Validade:", value=val_atual if pd.notnull(val_atual) else None, key="val_inv_input")
+                with c_btn:
+                    st.write("") # Espaço
+                    st.write("") # Espaço
+                    if st.button("➕ Adicionar à Lista Temporária", type="primary"):
+                        # Adiciona ao session_state
+                        novo_item = {
+                            'Código': cod_sel,
+                            'Produto': nome_sel,
+                            'Nova Qtd Real': qtd_contada,
+                            'Nova Validade': val_nova,
+                            'Status': 'Pendente'
+                        }
+                        st.session_state['lote_inventario'].append(novo_item)
+                        st.success(f"{nome_sel} adicionado à lista!")
+                        # O rerun limpa o input para o próximo
+                        st.rerun()
+
+        # 3. Tabela de Revisão (Onde a mágica acontece)
+        st.divider()
+        st.markdown("### 2️⃣ Revisar Lista Temporária (Antes de Salvar)")
+        
+        if st.session_state['lote_inventario']:
+            df_lote = pd.DataFrame(st.session_state['lote_inventario'])
+            
+            # Permite editar a lista temporária caso tenha errado algo
+            df_lote_editavel = st.data_editor(
+                df_lote, 
+                use_container_width=True, 
+                num_rows="dynamic",
+                key="editor_lote_inv"
+            )
+
+            c_limpar, c_salvar = st.columns([1, 2])
+            
+            with c_limpar:
+                if st.button("🗑️ Limpar Lista"):
+                    st.session_state['lote_inventario'] = []
+                    st.rerun()
+            
+            with c_salvar:
+                if st.button("💾 PROCESSAR TUDO AGORA (Salvar na Nuvem)", type="primary"):
+                    # Processamento em Lote
+                    logs_inventario = []
+                    alteracoes_feitas = 0
+                    
+                    bar = st.progress(0)
+                    total = len(df_lote_editavel)
+
+                    for i, row in df_lote_editavel.iterrows():
+                        cod = row['Código']
+                        nova_q = row['Nova Qtd Real']
+                        nova_v = row['Nova Validade']
+                        
+                        mask = df['código de barras'] == cod
+                        if mask.any():
+                            idx = df[mask].index[0]
+                            qtd_antiga = df.at[idx, 'qtd.estoque']
+                            
+                            # Atualiza DF principal
+                            df.at[idx, 'qtd.estoque'] = nova_q
+                            df.at[idx, 'validade'] = pd.to_datetime(nova_v) if nova_v else None
+                            
+                            # Log
+                            if qtd_antiga != nova_q:
+                                logs_inventario.append({
+                                    'data_hora': str(obter_hora_manaus()),
+                                    'produto': row['Produto'],
+                                    'qtd_antes': qtd_antiga,
+                                    'qtd_nova': nova_q,
+                                    'acao': 'Inventário Rápido',
+                                    'motivo': 'Contagem Lote'
+                                })
+                            alteracoes_feitas += 1
+                        bar.progress((i + 1) / total)
+
+                    # Salva no Google UMA VEZ
+                    salvar_estoque(df, prefixo)
+                    salvar_logs_em_lote(prefixo, logs_inventario)
+                    
+                    st.session_state['lote_inventario'] = [] # Limpa a lista
+                    st.balloons()
+                    st.success(f"✅ Sucesso! {alteracoes_feitas} produtos atualizados de uma só vez.")
+                    st.rerun()
+        else:
+            st.info("A lista temporária está vazia. Adicione produtos acima.")
 
     elif modo == "⚖️ Conciliação (Shoppbud vs App)":
         st.title("⚖️ Conciliação de Estoque")
@@ -1061,6 +1186,7 @@ if df is not None:
                                 df.at[idx, 'qtd.estoque'] += qtd_pick
                                 log_movs.append({'data_hora': str(obter_hora_manaus()), 'produto': nome_prod, 'qtd_movida': qtd_pick})
                                 
+                                # PREPARA LOTE
                                 atualizacoes_casa_global.append({'produto': nome_prod, 'qtd_central': df.at[idx, 'qtd_central']})
                                 log_auditoria_buffer.append({'data_hora': str(obter_hora_manaus()), 'produto': nome_prod, 'qtd_antes': qtd_antiga_loja, 'qtd_nova': df.at[idx, 'qtd.estoque'], 'acao': "Transferência Picklist", 'motivo': "Lote"})
                                 movidos += 1
@@ -1072,6 +1198,7 @@ if df is not None:
                         df_mov = pd.concat([df_mov, pd.DataFrame(log_movs)], ignore_index=True)
                         salvar_movimentacoes(df_mov, prefixo)
                     
+                    # SALVA LOTES
                     salvar_logs_em_lote(prefixo, log_auditoria_buffer)
                     atualizar_casa_global_em_lote(atualizacoes_casa_global, prefixo)
                     
@@ -1305,7 +1432,7 @@ if df is not None:
                         
                         novos_hist.append({
                             'data': str(data_lancamento_final), 
-                            'data_emissao': data_xml_str,       
+                            'data_emissao': data_xml_str,        
                             'produto': nome_final, 
                             'fornecedor': dados['fornecedor'], 
                             'qtd': item['qtd'], 
@@ -1624,14 +1751,14 @@ if df is not None:
                         else:
                             st.warning(f"⚠️ Não consegui identificar o tipo do arquivo: {arq.name}.")
                             st.caption("Dica: o app reconhece 2 formatos do Shoppbud: (1) **Sales (itens/produtos)** e (2) **Sales by Transaction (transações)**. "
-                                       "Se o arquivo tiver linhas de título acima do cabeçalho, confira se a exportação veio sem linhas extras. "
-                                       "Abaixo estão as primeiras colunas lidas para ajudar a diagnosticar.")
+                                            "Se o arquivo tiver linhas de título acima do cabeçalho, confira se a exportação veio sem linhas extras. "
+                                            "Abaixo estão as primeiras colunas lidas para ajudar a diagnosticar.")
                             try:
                                 st.write("Colunas lidas (parcial):", list(df.columns)[:30])
                             except Exception:
                                 pass
                             st.info("Para **80/20** e **Mix (sem giro)** o app precisa do arquivo **Sales (itens/produtos)**. "
-                                    "O arquivo **Sales by Transaction** sozinho não tem a lista de produtos vendida (apenas totais por transação).")
+                                            "O arquivo **Sales by Transaction** sozinho não tem a lista de produtos vendida (apenas totais por transação).")
                     except Exception as e:
                         st.error(f"Erro ao processar {arq.name}: {e}")
 
