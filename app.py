@@ -1430,18 +1430,48 @@ if df is not None:
         if arq and st.button("Processar"):
             if processar_excel_oficial(arq): st.success("Base atualizada!"); st.rerun()
 
+    # ==============================================================================
+    # 🔄 MUDANÇA DA REGRA DE OURO: PLANOGRAMA COM LEITURA INTELIGENTE DE CABEÇALHO
+    # ==============================================================================
     elif modo == "🔄 Sincronizar (Planograma)":
         st.title(f"🔄 Sincronizar - {loja_atual}")
         arquivo = st.file_uploader("📂 Planograma", type=['xlsx', 'xls', 'csv'])
         if arquivo:
             try:
-                df_raw = pd.read_csv(arquivo, header=None) if arquivo.name.endswith('.csv') else pd.read_excel(arquivo, header=None)
-                cols = df_raw.columns.tolist()
+                # Agora lê a primeira linha como cabeçalho para obter os nomes reais das colunas
+                if arquivo.name.endswith('.csv'):
+                    try: 
+                        df_raw = pd.read_csv(arquivo)
+                    except:
+                        arquivo.seek(0)
+                        df_raw = pd.read_csv(arquivo, sep=';')
+                else:
+                    df_raw = pd.read_excel(arquivo)
+            except Exception as e:
+                st.error(f"Erro ao ler arquivo: {e}")
+                df_raw = pd.DataFrame()
+                
+            if not df_raw.empty:
+                cols = [str(c).strip() for c in df_raw.columns.tolist()]
+                cols_lower = [c.lower() for c in cols]
+                
+                # Caçador automático de colunas para facilitar a vida
+                def find_idx(keywords, default=0):
+                    for i, c in enumerate(cols_lower):
+                        if any(k in c for k in keywords): return i
+                    return default
+                
+                idx_barras = find_idx(['código', 'codigo', 'barras'], 0)
+                idx_nome = find_idx(['nome', 'produto', 'descrição'], 1 if len(cols)>1 else 0)
+                idx_qtd = find_idx(['qtd', 'quantidade', 'estoque'], len(cols)-1)
+                idx_preco = find_idx(['preço', 'preco', 'valor', 'venda', 'consumidor'], -1)
+
                 c1, c2, c3, c4 = st.columns(4)
-                idx_barras = c1.selectbox("CÓDIGO BARRAS", cols, index=0)
-                idx_nome = c2.selectbox("NOME", cols, index=1)
-                idx_qtd = c3.selectbox("QUANTIDADE", cols, index=len(cols)-1)
-                idx_preco = c4.selectbox("PREÇO VENDA", ["(Ignorar)"] + cols)
+                col_barras = c1.selectbox("CÓDIGO BARRAS", cols, index=idx_barras)
+                col_nome = c2.selectbox("NOME", cols, index=idx_nome)
+                col_qtd = c3.selectbox("QUANTIDADE", cols, index=idx_qtd)
+                opcoes_preco = ["(Ignorar)"] + cols
+                col_preco = c4.selectbox("PREÇO VENDA", opcoes_preco, index=(idx_preco + 1) if idx_preco != -1 else 0)
                 
                 if st.button("🚀 SINCRONIZAR TUDO"):
                     df = carregar_dados(prefixo)
@@ -1450,11 +1480,11 @@ if df is not None:
                     total_linhas = len(df_raw)
                     bar = st.progress(0)
                     
-                    for i in range(1, total_linhas):
+                    for i, row in df_raw.iterrows():
                         try:
-                            cod = str(df_raw.iloc[i, idx_barras]).replace('.0', '').strip()
-                            nome = normalizar_texto(str(df_raw.iloc[i, idx_nome]))
-                            qtd = pd.to_numeric(df_raw.iloc[i, idx_qtd], errors='coerce')
+                            cod = str(row[col_barras]).replace('.0', '').strip()
+                            nome = normalizar_texto(str(row[col_nome]))
+                            qtd = pd.to_numeric(row[col_qtd], errors='coerce')
                             if cod and nome and pd.notnull(qtd):
                                 mask = df['código de barras'] == cod
                                 if mask.any():
@@ -1462,12 +1492,12 @@ if df is not None:
                                     antigo = df.at[idx, 'qtd.estoque']
                                     df.loc[mask, 'qtd.estoque'] = qtd
                                     if antigo != qtd: logs_plano.append({'data_hora': str(obter_hora_manaus()), 'produto': nome, 'qtd_antes': antigo, 'qtd_nova': qtd, 'acao': "Sincronização", 'motivo': "Planograma"})
-                                    if idx_preco != "(Ignorar)":
-                                        val = pd.to_numeric(df_raw.iloc[i, idx_preco], errors='coerce')
+                                    if col_preco != "(Ignorar)":
+                                        val = pd.to_numeric(row[col_preco], errors='coerce')
                                         if pd.notnull(val): df.loc[mask, 'preco_venda'] = val
                                 else:
                                     val_p = 0.0
-                                    if idx_preco != "(Ignorar)": val_p = pd.to_numeric(df_raw.iloc[i, idx_preco], errors='coerce') or 0.0
+                                    if col_preco != "(Ignorar)": val_p = pd.to_numeric(row[col_preco], errors='coerce') or 0.0
                                     novos_prods.append({'código de barras': cod, 'nome do produto': nome, 'qtd.estoque': qtd, 'qtd_central': 0, 'qtd_minima': 5, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': 0.0, 'preco_venda': val_p, 'categoria': 'GERAL', 'ultimo_fornecedor': '', 'preco_sem_desconto': 0.0, 'status': 'Ativo'})
                         except: pass
                         bar.progress((i+1)/total_linhas)
@@ -1477,7 +1507,6 @@ if df is not None:
                     salvar_logs_em_lote(prefixo, logs_plano) 
                     st.success("Sincronizado!")
                     st.rerun()
-            except Exception as e: st.error(f"Erro: {e}")
 
     elif modo == "📈 Vendas (Importar & 80/20)":
 
@@ -1850,7 +1879,7 @@ if df is not None:
                 else: st.info("Vazio.")
 
     # ==============================================================================
-    # 🔎 NOVO: RAIO-X DO ESTOQUE (AUDITORIA INTELIGENTE)
+    # 🔄 NOVA REGRA DE OURO APLICADA: RAIO-X DO ESTOQUE (COM MENU INTELIGENTE)
     # ==============================================================================
     elif modo == "🔎 Raio-X do Estoque (Auditoria)":
         st.title(f"🔎 Raio-X do Estoque - {loja_atual}")
@@ -1865,18 +1894,25 @@ if df is not None:
         dt_fim = c2.date_input("📅 Data Final:", hoje)
         
         st.markdown("### 🎛️ Filtros da Auditoria")
-        col_busca, col_cat = st.columns(2)
+        col_cat, col_busca = st.columns(2)
         
-        # Filtro 1: Busca Robusta (Texto ou Código de Barras)
-        busca_raiox = col_busca.text_input("🔍 Buscar Produto (Nome ou Código de Barras):", placeholder="Ex: coca ou 789...")
-        
-        # Filtro 2: Categoria Inteligente
+        # Filtro 1: Categoria Inteligente
         if 'categoria' in df.columns:
             lista_categorias = sorted([c for c in df['categoria'].astype(str).unique() if c.strip()])
         else:
             lista_categorias = []
         
-        cat_selecionada = col_cat.selectbox("🗂️ Filtrar por Categoria:", ["Todas"] + lista_categorias)
+        cat_selecionada = col_cat.selectbox("🗂️ Filtrar por Categoria:", ["[ Todas ]"] + lista_categorias)
+
+        # Atualiza a lista da "Busca Estilo Gôndola" em tempo real baseado na categoria
+        df_opcoes = df.copy()
+        if cat_selecionada != "[ Todas ]":
+            df_opcoes = df_opcoes[df_opcoes['categoria'].astype(str).str.upper() == cat_selecionada.upper()]
+        
+        lista_prods_raiox = sorted((df_opcoes['código de barras'].astype(str) + " - " + df_opcoes['nome do produto'].astype(str)).unique().tolist())
+        
+        # Filtro 2: A famosa "Busca Estilo Gôndola"
+        busca_raiox = col_busca.selectbox("🔍 Buscar Produto Específico (Menu Rápido):", ["[ Mostrar Todos ]"] + lista_prods_raiox)
 
         # Filtro 3: Limpar tela (Mostrar só quem movimentou)
         apenas_movimentados = st.checkbox("Mostrar apenas produtos que tiveram movimentação no período (Entrou ou Saiu)", value=True)
@@ -1901,12 +1937,14 @@ if df is not None:
 
                 resultado = []
 
-                # Aplica os filtros na base antes de calcular para ficar super rápido
+                # Aplica os filtros escolhidos em cima
                 df_filtrado = df.copy()
-                if busca_raiox:
-                    df_filtrado = filtrar_dados_inteligente(df_filtrado, 'nome do produto', busca_raiox)
-                if cat_selecionada != "Todas":
+                if cat_selecionada != "[ Todas ]":
                     df_filtrado = df_filtrado[df_filtrado['categoria'].astype(str).str.upper() == cat_selecionada.upper()]
+                
+                if busca_raiox != "[ Mostrar Todos ]":
+                    cod_busca = busca_raiox.split(' - ', 1)[0]
+                    df_filtrado = df_filtrado[df_filtrado['código de barras'].astype(str) == cod_busca]
 
                 for idx, row in df_filtrado.iterrows():
                     cod = str(row.get('código de barras', '')).strip()
@@ -1926,11 +1964,11 @@ if df is not None:
                         mask_v = mask_v_cod | mask_v_nome if cod else mask_v_nome
                         qtd_venda = df_v[mask_v]['qtd_vendida'].sum()
 
-                    # 3. Ignorar parados se o checkbox estiver ativo
+                    # 3. Ignorar parados se a caixa de seleção estiver ativa
                     if apenas_movimentados and qtd_compra == 0 and qtd_venda == 0:
                         continue
 
-                    # 4. Matemática do Saldo (Substituindo negativos por palavras)
+                    # 4. Matemática do Saldo
                     saldo = qtd_compra - qtd_venda
 
                     if saldo > 0:
@@ -1940,7 +1978,7 @@ if df is not None:
                     else:
                         txt_saldo = "⚪ Ficou igual"
 
-                    # 5. Nome visual com o Código de Barras (Pedida do Chef!)
+                    # 5. Nome visual
                     nome_formatado = f"{cod} - {nome}" if cod else nome
 
                     resultado.append({
@@ -1957,7 +1995,7 @@ if df is not None:
                     df_res = pd.DataFrame(resultado)
                     st.dataframe(df_res, use_container_width=True, hide_index=True)
                 else:
-                    st.info("Nenhum produto encontrado com os filtros selecionados ou nenhuma movimentação no período.")
+                    st.info("Nenhum produto encontrado com os filtros selecionados ou não houve movimentação no período.")
 
     elif modo == "🏠 Gôndola (Loja)":
         st.title(f"🏠 Gôndola - {loja_atual}")
@@ -2101,7 +2139,6 @@ if df is not None:
                     df_prod = df_hist[df_hist['produto'] == nome_para_filtro].copy()
                     
                     if not df_prod.empty:
-                        # --- MELHORIA: FILTRAR ZEROS PARA NÃO SUJAR O GRÁFICO ---
                         df_validos = df_prod[df_prod['preco_pago'] > 0.01]
                         if df_validos.empty: df_validos = df_prod 
 
