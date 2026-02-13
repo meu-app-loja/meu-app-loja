@@ -119,19 +119,19 @@ def normalizar_para_busca(texto):
     if not isinstance(texto, str): return ""
     return normalizar_texto(texto)
 
-# --- NOVA BLINDAGEM DE CÓDIGO DE BARRAS (SUPER LUPA) ---
+# --- 🧑‍⚕️ VACINA DO CÓDIGO DE BARRAS (SUPER LUPA REFINADA) ---
 def padronizar_codigo_barras(valor):
     """
-    Remove pontos, espaços, caracteres especiais e todos os ZEROS à esquerda.
-    Garante que '07894900027013' e '7894900027013.0' virem a mesma coisa: '7894900027013'
+    Remove formatos estranhos (como '.0' no final) e arranca zeros à esquerda,
+    garantindo que o sistema reconheça o CPF do produto sempre do mesmo jeito.
     """
     if pd.isna(valor) or valor is None: return ""
     s = str(valor).strip().upper()
-    s = s.replace('.0', '')
-    s = re.sub(r'[^A-Z0-9]', '', s) # Remove tudo que não for letra ou número
-    s = s.lstrip('0') # Arranca os zeros da frente
+    if s.endswith('.0'): s = s[:-2] # Evita estragar números com .0 no final de forma mais segura
+    s = re.sub(r'[^A-Z0-9]', '', s) # Limpa tudo que não for letra ou número
+    s = s.lstrip('0') # Arranca os zeros da frente para bater Shoppbud vs XML perfeitamente
     return s
-# -------------------------------------------------------
+# -----------------------------------------------------------
 
 def filtrar_df_busca_robusta(df, query, cols_text=None, cols_barcode=None):
     try:
@@ -207,7 +207,8 @@ def ler_excel_com_header_auto(file_obj, max_rows=25):
     try: file_obj.seek(0)
     except Exception: pass
 
-    amostra = pd.read_excel(file_obj, header=None, nrows=max_rows)
+    # 🧑‍⚕️ CIRURGIA: Forçando dtype=str (Lendo como Texto)
+    amostra = pd.read_excel(file_obj, header=None, nrows=max_rows, dtype=str)
     chaves = ["PRODUTO", "ITEM", "DESCRICAO", "QTD", "QUANTIDADE", "TRANSACAO", "ID", "DATA", "LOJA"]
 
     melhor_linha = None
@@ -228,7 +229,8 @@ def ler_excel_com_header_auto(file_obj, max_rows=25):
     try: file_obj.seek(0)
     except Exception: pass
 
-    df = pd.read_excel(file_obj, header=header_row).dropna(axis=1, how="all")
+    # 🧑‍⚕️ CIRURGIA: Forçando dtype=str na leitura oficial
+    df = pd.read_excel(file_obj, header=header_row, dtype=str).dropna(axis=1, how="all")
     cols = list(df.columns)
     return df, header_row, cols
 
@@ -242,7 +244,7 @@ def unificar_produtos_por_codigo(df):
 
     lista_final = []
     
-    # CIRURGIA DE UNIFICAÇÃO (Agrupa pela Super Lupa do Código de Barras)
+    # CIRURGIA DE UNIFICAÇÃO: Usando a Super Lupa para fundir clones
     df['codigo_padrao'] = df['código de barras'].apply(padronizar_codigo_barras)
     sem_codigo = df[df['codigo_padrao'] == ""]
     com_codigo = df[df['codigo_padrao'] != ""]
@@ -279,8 +281,10 @@ def unificar_produtos_por_codigo(df):
 
 def processar_excel_oficial(arquivo_subido):
     try:
-        if arquivo_subido.name.endswith('.csv'): df_temp = pd.read_csv(arquivo_subido)
-        else: df_temp = pd.read_excel(arquivo_subido)
+        # 🧑‍⚕️ CIRURGIA: Lendo como Texto (dtype=str)
+        if arquivo_subido.name.endswith('.csv'): df_temp = pd.read_csv(arquivo_subido, dtype=str)
+        else: df_temp = pd.read_excel(arquivo_subido, dtype=str)
+        
         if 'obrigatório' in str(df_temp.iloc[0].values): df_temp = df_temp.iloc[1:].reset_index(drop=True)
         df_temp.columns = df_temp.columns.str.strip()
         col_nome = next((c for c in df_temp.columns if 'nome' in c.lower()), 'Nome')
@@ -533,7 +537,6 @@ def atualizar_casa_global_em_lote(lista_atualizacoes, prefixo_origem):
 def inicializar_arquivos(prefixo):
     arquivos = {
         f"{prefixo}_estoque": ['código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central', 'qtd_minima', 'validade', 'status_compra', 'qtd_comprada', 'preco_custo', 'preco_venda', 'categoria', 'ultimo_fornecedor', 'preco_sem_desconto', 'status'],
-        # CIRURGIA: Adicionado o 'código_barras' no histórico para a Máquina do Tempo puxar o CPF do produto!
         f"{prefixo}_historico_compras": ['data', 'data_emissao', 'código_barras', 'produto', 'fornecedor', 'qtd', 'preco_pago', 'total_gasto', 'numero_nota', 'desconto_total_money', 'preco_sem_desconto', 'obs_importacao'],
         f"{prefixo}_movimentacoes": ['data_hora', 'produto', 'qtd_movida'],
         f"{prefixo}_vendas": ['data_hora', 'produto', 'qtd_vendida', 'estoque_restante'],
@@ -569,7 +572,6 @@ def carregar_historico(prefixo_arquivo):
                  df_h[c] = df_h[c].astype(str).str.replace(',', '.', regex=False)
                  df_h[c] = pd.to_numeric(df_h[c], errors='coerce').fillna(0)
         
-        # Garante colunas que podem não existir em BDs antigos
         for col in ['numero_nota', 'obs_importacao', 'data_emissao', 'código_barras']:
              if col not in df_h.columns: df_h[col] = ""
              
@@ -665,7 +667,6 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
                 item['preco_un_liquido'] = val_final / qtd_raw
                 item['preco_un_bruto'] = (val_final + desc_val) / qtd_raw
             
-            # CIRURGIA XML: Retirada a "adivinhação de nome" daqui para evitar misturar produtos
             ean_xml = str(item['ean']).strip()
             if ean_xml in ['SEM GTIN', '', 'None', 'NAN']:
                 item['ean'] = item['codigo_interno']
@@ -706,7 +707,6 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
                 item['desconto_total_item'] = vDesc    
                 item['preco_un_liquido'] = (vProd - vDesc) / qCom 
                 
-            # CIRURGIA XML: Retirada a "adivinhação de nome" daqui também
             ean_xml = str(item['ean']).strip()
             if ean_xml in ['SEM GTIN', '', 'None', 'NAN']:
                 item['ean'] = item['codigo_interno']
@@ -925,11 +925,13 @@ if df is not None:
         arq_planograma = st.file_uploader("📂 Carregar Planograma Shoppbud (.xlsx)", type=['xlsx'])
         if arq_planograma:
             try:
-                df_plan = pd.read_excel(arq_planograma)
+                # 🧑‍⚕️ CIRURGIA: Forçando dtype=str (Texto Puro)
+                df_plan = pd.read_excel(arq_planograma, dtype=str)
                 col_cod_plan = next((c for c in df_plan.columns if ('código' in c.lower() or 'codigo' in c.lower()) and 'barras' in c.lower()), None)
                 col_qtd_plan = next((c for c in df_plan.columns if 'qtd' in c.lower() and 'estoque' in c.lower()), None)
                 
                 if col_cod_plan and col_qtd_plan:
+                    df_plan[col_qtd_plan] = df_plan[col_qtd_plan].apply(parse_num_br) # Transforma qtd em número
                     df_plan['código normalizado'] = df_plan[col_cod_plan].apply(padronizar_codigo_barras)
                     df['código normalizado'] = df['código de barras'].apply(padronizar_codigo_barras)
                     df_concilia = pd.merge(df[['código normalizado', 'nome do produto', 'qtd.estoque']], df_plan[[col_cod_plan, col_qtd_plan, 'código normalizado']], on='código normalizado', how='inner')
@@ -981,12 +983,14 @@ if df is not None:
                 lista_dfs = []
                 st.info(f"📂 {len(arquivos_pick)} arquivos carregados.")
                 primeiro_arquivo = arquivos_pick[0]
-                df_temp_raw = pd.read_excel(primeiro_arquivo, header=None)
+                
+                # 🧑‍⚕️ CIRURGIA: Lendo como Texto (dtype=str)
+                df_temp_raw = pd.read_excel(primeiro_arquivo, header=None, dtype=str)
                 st.dataframe(df_temp_raw.head(5))
                 linha_cabecalho = st.number_input("Em qual linha estão os títulos?", min_value=0, value=0)
                 for arq in arquivos_pick:
                     arq.seek(0)
-                    df_temp = pd.read_excel(arq, header=linha_cabecalho)
+                    df_temp = pd.read_excel(arq, header=linha_cabecalho, dtype=str)
                     lista_dfs.append(df_temp)
                 df_pick = pd.concat(lista_dfs, ignore_index=True)
                 cols = df_pick.columns.tolist()
@@ -1186,7 +1190,7 @@ if df is not None:
                     st.rerun()
 
     # ==============================================================================
-    # 🔄 XML IMPORTAÇÃO CIRURGIA (SEM ADIVINHAR NOME E COM BLINDAGEM DE CPF)
+    # 🔄 XML IMPORTAÇÃO: SELEÇÃO BLINDADA PELO CÓDIGO
     # ==============================================================================
     elif modo == "📥 Importar XML (Associação Inteligente)":
         st.title(f"📥 Importar XML")
@@ -1221,13 +1225,11 @@ if df is not None:
                 for i, item in enumerate(dados['itens']):
                     match_inicial = "(CRIAR NOVO)"
                     if not df.empty:
-                        # 🧑‍⚕️ CIRURGIA: Super Lupa!
                         cod_xml_limpo = padronizar_codigo_barras(item['ean'])
                         mask_ean = df['código de barras'].apply(padronizar_codigo_barras) == cod_xml_limpo
                         
                         if cod_xml_limpo and mask_ean.any(): 
                             match_inicial = f"[SISTEMA] {df.loc[mask_ean, 'código de barras'].values[0]} - {df.loc[mask_ean, 'nome do produto'].values[0]}"
-                        # Removemos o "elif" que buscava o nome para não misturar Coca normal com Coca Zero!
                     
                     st.divider()
                     c1, c2 = st.columns([1, 1])
@@ -1239,13 +1241,16 @@ if df is not None:
                     novos_hist = []; logs_xml = []; atualizacoes_casa_xml = [] 
                     for i, item in enumerate(dados['itens']):
                         esc = escolhas[i]
-                        cod_final_para_historico = item['ean'] # Padrão se for CRIAR NOVO
+                        cod_final_para_historico = item['ean']
                         
                         if "[SISTEMA]" in esc:
                              raw_sel = esc.replace("[SISTEMA] ", "")
-                             nome_final = raw_sel.split(' - ', 1)[1]
+                             parts = raw_sel.split(' - ', 1)
+                             cod_sistema = parts[0].strip()
+                             nome_final = parts[1].strip()
                         else:
                              nome_final = item['nome'].upper()
+                             cod_sistema = item['ean']
 
                         if esc == "(CRIAR NOVO)":
                             novo = {
@@ -1267,10 +1272,14 @@ if df is not None:
                             df = pd.concat([df, pd.DataFrame([novo])], ignore_index=True)
                             if "Atualizar" in modo_import: logs_xml.append({'data_hora': str(data_lancamento_final), 'produto': nome_final, 'qtd_antes': 0, 'qtd_nova': item['qtd'], 'acao': "XML Novo", 'motivo': "Entrada Casa"})
                         else:
-                            mask = df['nome do produto'].astype(str) == nome_final
+                            # 🧑‍⚕️ CIRURGIA: Match exato por Código E Nome
+                            mask = (df['nome do produto'].astype(str) == nome_final) & (df['código de barras'].astype(str) == cod_sistema)
+                            if not mask.any():
+                                mask = df['nome do produto'].astype(str) == nome_final # Plano B caso o usuário tenha alterado o código
+                            
                             if mask.any():
                                 idx = df[mask].index[0]
-                                cod_final_para_historico = df.at[idx, 'código de barras'] # Pega o CPF correto do sistema
+                                cod_final_para_historico = df.at[idx, 'código de barras'] 
                                 if "Atualizar" in modo_import:
                                     df.at[idx, 'qtd_central'] += item['qtd']
                                     logs_xml.append({'data_hora': str(data_lancamento_final), 'produto': nome_final, 'qtd_antes': df.at[idx, 'qtd_central']-item['qtd'], 'qtd_nova': df.at[idx, 'qtd_central'], 'acao': "XML Entrada", 'motivo': "Entrada Casa"})
@@ -1282,7 +1291,7 @@ if df is not None:
                         novos_hist.append({
                             'data': str(data_lancamento_final), 
                             'data_emissao': data_xml_str,
-                            'código_barras': cod_final_para_historico, # 🧑‍⚕️ CIRURGIA: Salvando o CPF no histórico!
+                            'código_barras': cod_final_para_historico, 
                             'produto': nome_final, 
                             'fornecedor': dados['fornecedor'], 
                             'qtd': item['qtd'], 
@@ -1307,7 +1316,7 @@ if df is not None:
             if processar_excel_oficial(arq): st.success("Base atualizada!"); st.rerun()
 
     # ==============================================================================
-    # 🔄 PLANOGRAMA CIRURGIA (AGRUPAMENTO BLINDADO PELA SUPER LUPA DE CPF)
+    # 🔄 PLANOGRAMA: LENDO COMO TEXTO PURO E AGRUPANDO COM A LUPA
     # ==============================================================================
     elif modo == "🔄 Sincronizar (Planograma)":
         st.title(f"🔄 Sincronizar - {loja_atual}")
@@ -1315,14 +1324,15 @@ if df is not None:
         if arquivo:
             try:
                 arquivo.seek(0)
+                # 🧑‍⚕️ CIRURGIA: Forçando dtype=str (Texto Puro) para matar a notação científica 
                 if arquivo.name.endswith('.csv'):
                     try: 
-                        df_raw = pd.read_csv(arquivo)
+                        df_raw = pd.read_csv(arquivo, dtype=str)
                     except:
                         arquivo.seek(0)
-                        df_raw = pd.read_csv(arquivo, sep=';')
+                        df_raw = pd.read_csv(arquivo, sep=';', dtype=str)
                 else:
-                    df_raw = pd.read_excel(arquivo)
+                    df_raw = pd.read_excel(arquivo, dtype=str)
             except Exception as e:
                 st.error(f"Erro ao ler arquivo: {e}")
                 df_raw = pd.DataFrame()
@@ -1357,7 +1367,6 @@ if df is not None:
                     novos_prods = []
                     logs_plano = [] 
                     
-                    # 🧑‍⚕️ CIRURGIA: Super Lupa aplicada na raiz!
                     df_raw['codigo_limpo'] = df_raw[col_barras].apply(padronizar_codigo_barras)
                     
                     invalidos = ["", "NAN", "NONE", "SEMGTIN", "NAOINFORMADO"]
@@ -1388,7 +1397,6 @@ if df is not None:
                             qtd = row[col_qtd]
                             
                             if cod_limpo and nome:
-                                # Compara usando a Super Lupa no BD atual também
                                 mask = df['código de barras'].apply(padronizar_codigo_barras) == cod_limpo
                                 if mask.any():
                                     idx = df[mask].index[0]
@@ -1445,7 +1453,6 @@ if df is not None:
 
                 df_ref = df.copy()
                 df_ref['nome_norm'] = df_ref['nome do produto'].astype(str).apply(normalizar_para_busca)
-                # Dicionário blindado com a Super Lupa
                 map_cod_to_idx = {padronizar_codigo_barras(r['código de barras']): i for i, r in df_ref.reset_index().iterrows() if padronizar_codigo_barras(r['código de barras'])}
                 lista_nomes = df_ref['nome do produto'].astype(str).tolist()
 
@@ -1757,9 +1764,6 @@ if df is not None:
                 if not df_vt.empty: st.dataframe(df_vt.sort_values(by='data_hora', ascending=False).head(500), use_container_width=True, hide_index=True)
                 else: st.info("Vazio.")
 
-    # ==============================================================================
-    # 🔎 RAIO-X CIRURGIA (Data expandida para 30 dias e cruzamento pela Lupa)
-    # ==============================================================================
     elif modo == "🔎 Raio-X do Estoque (Auditoria)":
         st.title(f"🔎 Raio-X do Estoque - {loja_atual}")
         st.markdown(
@@ -1769,7 +1773,7 @@ if df is not None:
 
         c1, c2 = st.columns(2)
         hoje = obter_hora_manaus().date()
-        dt_ini = c1.date_input("📅 Data Inicial:", hoje - timedelta(days=30)) # 🧑‍⚕️ CIRURGIA: 30 dias por padrão
+        dt_ini = c1.date_input("📅 Data Inicial:", hoje - timedelta(days=30))
         dt_fim = c2.date_input("📅 Data Final:", hoje)
         
         st.markdown("### 🎛️ Filtros da Auditoria")
@@ -1817,11 +1821,9 @@ if df is not None:
 
                 for idx, row in df_filtrado.iterrows():
                     cod = str(row.get('código de barras', '')).strip()
-                    # 🧑‍⚕️ CIRURGIA: Super Lupa Raio-X
                     cod_limpo = padronizar_codigo_barras(cod)
                     nome = str(row.get('nome do produto', '')).strip().upper()
 
-                    # 1. Contar Compras (XML)
                     qtd_compra = 0
                     if not df_c.empty:
                         if 'código_barras' in df_c.columns:
@@ -1832,7 +1834,6 @@ if df is not None:
                             mask_c = df_c['produto'].astype(str).str.upper() == nome
                         qtd_compra = df_c[mask_c]['qtd'].sum()
 
-                    # 2. Contar Vendas (Shoppbud)
                     qtd_venda = 0
                     if not df_v.empty:
                         mask_v_cod = df_v['código_barras'].apply(padronizar_codigo_barras) == cod_limpo
@@ -2239,7 +2240,7 @@ if df is not None:
                                     dt_full = datetime.combine(dt_reg, hr_reg)
                                     hist = {
                                         'data': str(dt_full), 
-                                        'código_barras': df.at[idx_prod, 'código de barras'], # CIRURGIA
+                                        'código_barras': df.at[idx_prod, 'código de barras'],
                                         'produto': c_nome.upper().strip(), 
                                         'fornecedor': c_forn, 
                                         'qtd': qtd_input, 
@@ -2378,12 +2379,10 @@ if df is not None:
                 
                 for idx, row in df.iterrows():
                     cod = str(row.get('código de barras', '')).strip()
-                    # 🧑‍⚕️ CIRURGIA MÁQUINA DO TEMPO: Usar a Super Lupa
                     cod_limpo = padronizar_codigo_barras(cod)
                     nome = str(row.get('nome do produto', '')).strip().upper()
                     loja_atual = float(row.get('qtd.estoque', 0))
 
-                    # Soma compras (Tenta pelo código blindado primeiro)
                     qtd_compra = 0
                     if not df_c.empty:
                         if 'código_barras' in df_c.columns:
@@ -2394,7 +2393,6 @@ if df is not None:
                             mask_c = df_c['produto'].astype(str).str.upper() == nome
                         qtd_compra = float(df_c[mask_c]['qtd'].sum())
 
-                    # Soma vendas
                     qtd_venda = 0
                     if not df_v.empty:
                         mask_v_cod = df_v['código_barras'].apply(padronizar_codigo_barras) == cod_limpo
@@ -2402,7 +2400,6 @@ if df is not None:
                         mask_v = mask_v_cod | mask_v_nome if cod_limpo else mask_v_nome
                         qtd_venda = float(df_v[mask_v]['qtd_vendida'].sum())
 
-                    # Matemática da Auditoria
                     if qtd_compra > 0:
                         saldo_teorico = qtd_compra - qtd_venda
                         nova_casa = saldo_teorico - loja_atual
@@ -2448,14 +2445,15 @@ if df is not None:
             
             for arq in arquivos_backup:
                 try:
+                    # 🧑‍⚕️ CIRURGIA: Lendo os Backups sempre como Texto (dtype=str)
                     if arq.name.endswith('.csv'):
                         try:
-                            df_temp = pd.read_csv(arq)
+                            df_temp = pd.read_csv(arq, dtype=str)
                         except:
                             arq.seek(0)
-                            df_temp = pd.read_csv(arq, sep=';')
+                            df_temp = pd.read_csv(arq, sep=';', dtype=str)
                     else:
-                        df_temp = pd.read_excel(arq)
+                        df_temp = pd.read_excel(arq, dtype=str)
                     
                     df_temp.columns = df_temp.columns.str.strip().str.lower()
                     
