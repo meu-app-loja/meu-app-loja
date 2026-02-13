@@ -227,7 +227,6 @@ def ler_excel_com_header_auto(file_obj, max_rows=25):
     cols = list(df.columns)
     return df, header_row, cols
 
-# 🧑‍⚕️ CIRURGIA MESTRA AQUI: UNIFICANDO PELO NOME EXATO PARA MATAR OS CLONES
 def unificar_produtos_por_codigo(df):
     if df.empty: return df
     cols_num = ['qtd.estoque', 'qtd_central', 'qtd_minima', 'qtd_comprada', 'preco_custo', 'preco_venda', 'preco_sem_desconto']
@@ -238,14 +237,12 @@ def unificar_produtos_por_codigo(df):
 
     lista_final = []
     
-    # Criamos um nome 100% padronizado para agrupar as peças do quebra-cabeça
     df['nome_padrao'] = df['nome do produto'].apply(normalizar_texto)
 
     for nome, grupo in df.groupby('nome_padrao'):
         if len(grupo) > 1:
             melhor_nome = max(grupo['nome do produto'].tolist(), key=len)
             
-            # Pega o Código de Barras mais longo válido dentre os clones
             codigos = [str(c).strip() for c in grupo['código de barras'].tolist() if padronizar_codigo_barras(c)]
             melhor_cod = max(codigos, key=len) if codigos else ""
             
@@ -1302,7 +1299,7 @@ if df is not None:
             if processar_excel_oficial(arq): st.success("Base atualizada!"); st.rerun()
 
     # ==============================================================================
-    # 🔄 PLANOGRAMA: LENDO TEXTO PURO E CRUZANDO POR NOME EXATO!
+    # 🔄 PLANOGRAMA: DETECÇÃO CIRÚRGICA DE COLUNAS (Evitando a soma global)
     # ==============================================================================
     elif modo == "🔄 Sincronizar (Planograma)":
         st.title(f"🔄 Sincronizar - {loja_atual}")
@@ -1327,15 +1324,22 @@ if df is not None:
                 cols = df_raw.columns.tolist()
                 cols_lower = [c.lower() for c in cols]
                 
+                # 🧑‍⚕️ CIRURGIA DE DETECÇÃO: Agora não erra mais as colunas
                 def find_idx(keywords, default=0):
                     for k in keywords:
                         for i, c in enumerate(cols_lower):
                             if k in c: return i
                     return default
                 
-                idx_barras = find_idx(['barras', 'ean', 'gtin', 'código', 'codigo'], 0)
+                # Procura explicitamente EAN ou Barras antes de tentar "Código"
+                idx_barras = find_idx(['barras', 'ean', 'gtin'], -1)
+                if idx_barras == -1: idx_barras = find_idx(['código', 'codigo'], 0)
+                
                 idx_nome = find_idx(['produto', 'nome', 'descrição'], 1 if len(cols)>1 else 0)
-                idx_qtd = find_idx(['estoque', 'físico', 'quantidade real', 'qtd'], len(cols)-1)
+                
+                idx_qtd = find_idx(['estoque', 'físico', 'quantidade real'], -1)
+                if idx_qtd == -1: idx_qtd = find_idx(['qtd'], len(cols)-1)
+                
                 idx_preco = find_idx(['consumidor', 'venda', 'preço final', 'preco'], -1)
 
                 st.info("🎯 **Mapeamento Automático:** Confirme abaixo se o sistema achou as colunas certas!")
@@ -1382,32 +1386,30 @@ if df is not None:
                             qtd = row[col_qtd]
                             
                             if nome:
-                                mask = pd.Series(False, index=df.index)
-                                
-                                # 1. Tentaachar o produto pelo Código (Super Lupa)
-                                if cod_limpo:
+                                # 🧑‍⚕️ CIRURGIA DE ATUALIZAÇÃO SEGURA: Só atualiza 1 linha por vez e impede Códigos falsos
+                                if cod_limpo and len(cod_limpo) >= 4:
                                     mask = df['código de barras'].apply(padronizar_codigo_barras) == cod_limpo
+                                else:
+                                    mask = pd.Series(False, index=df.index)
                                 
-                                # 2. 🧑‍⚕️ CIRURGIA PLANOGRAMA: Se não achar, procura pelo NOME EXATO!
                                 if not mask.any():
                                     mask = df['nome do produto'].apply(normalizar_texto) == nome
                                 
                                 if mask.any():
-                                    idx = df[mask].index[0]
+                                    idx = df[mask].index[0] # Pega estritamente a primeira linha pra não infestar outras
                                     antigo = df.at[idx, 'qtd.estoque']
-                                    df.loc[mask, 'qtd.estoque'] = qtd
+                                    df.at[idx, 'qtd.estoque'] = qtd
                                     
-                                    # Se o produto no sistema estava sem código, agora ele ganha o código do Planograma
-                                    if not padronizar_codigo_barras(df.at[idx, 'código de barras']) and cod_limpo:
+                                    # Se não tinha código antes, só adota o novo se for um EAN real (>= 4 digitos)
+                                    if not padronizar_codigo_barras(df.at[idx, 'código de barras']) and cod_limpo and len(cod_limpo) >= 4:
                                         df.at[idx, 'código de barras'] = row[col_barras]
 
                                     if antigo != qtd: 
                                         logs_plano.append({'data_hora': str(obter_hora_manaus()), 'produto': nome, 'qtd_antes': antigo, 'qtd_nova': qtd, 'acao': "Sincronização", 'motivo': "Planograma"})
                                     if col_preco != "(Ignorar)":
                                         val = row[col_preco]
-                                        if pd.notnull(val): df.loc[mask, 'preco_venda'] = val
+                                        if pd.notnull(val): df.at[idx, 'preco_venda'] = val
                                 else:
-                                    # Só cria novo se não bater NADA (Nem Código, Nem Nome)
                                     val_p = 0.0
                                     if col_preco != "(Ignorar)": 
                                         val_p = row[col_preco] if pd.notnull(row[col_preco]) else 0.0
@@ -2301,7 +2303,6 @@ if df is not None:
                     st.success("Tabela Geral atualizada!")
                     st.rerun()
             with c2:
-                # 🧑‍⚕️ CIRURGIA MESTRA: Botão de Unificação Turbinado!
                 if st.button("🔮 UNIFICAR CLONES E LIMPAR DUPLICATAS"):
                     df.update(df_edit)
                     qtd_antes = len(df)
@@ -2312,10 +2313,28 @@ if df is not None:
                     st.balloons()
                     st.rerun()
 
+    # ==============================================================================
+    # 🛠️ O BOTÃO DE EMERGÊNCIA FOI ADICIONADO AQUI!
+    # ==============================================================================
     elif modo == "🛠️ Ajuste & Limpeza":
         st.title("🛠️ Ajuste & Limpeza de Estoque")
         st.info("Ferramentas para corrigir erros e limpar o cadastro.")
         
+        st.divider()
+        st.markdown("### 🚨 EMERGÊNCIA: Corrigir Bug do Planograma (466)")
+        st.write("Se o sistema infectou seus produtos colocando a mesma quantidade para todos e o código de barras '2', clique aqui para desinfetar sua base e recomeçar.")
+        if st.button("🧨 ZERAR LOJA E LIMPAR CÓDIGOS FALSOS"):
+            def limpar_falso(x):
+                s = str(x).strip()
+                if len(s) <= 3: return "" # Arranca códigos falsos como '2'
+                return s
+            df['código de barras'] = df['código de barras'].apply(limpar_falso)
+            df['qtd.estoque'] = 0 # Zera a infecção
+            salvar_estoque(df, prefixo)
+            st.success("✅ Loja zerada e códigos falsos apagados! Agora, vá em 'Sincronizar Planograma' e importe de novo (o sistema não errará as colunas).")
+            st.rerun()
+
+        st.divider()
         c_z1, c_z2 = st.columns(2)
         with c_z1:
             st.markdown("### 📉 Zerar Negativos")
