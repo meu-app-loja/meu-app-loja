@@ -1075,8 +1075,8 @@ if df is not None:
                 col_qtd_plan = next((c for c in df_plan.columns if 'qtd' in c.lower() and 'estoque' in c.lower()), None)
                 
                 if col_cod_plan and col_qtd_plan:
-                    df_plan['código normalizado'] = df_plan[col_cod_plan].astype(str).str.replace('.0', '').str.strip()
-                    df['código normalizado'] = df['código de barras'].astype(str).str.replace('.0', '').str.strip()
+                    df_plan['código normalizado'] = df_plan[col_cod_plan].astype(str).str.replace('.0', '').str.strip().str.lstrip('0')
+                    df['código normalizado'] = df['código de barras'].astype(str).str.replace('.0', '').str.strip().str.lstrip('0')
                     df_concilia = pd.merge(df[['código normalizado', 'nome do produto', 'qtd.estoque']], df_plan[[col_cod_plan, col_qtd_plan, 'código normalizado']], on='código normalizado', how='inner')
                     df_concilia['Diferença'] = df_concilia['qtd.estoque'] - df_concilia[col_qtd_plan]
                     df_divergente = df_concilia[df_concilia['Diferença'] != 0].copy()
@@ -1103,7 +1103,7 @@ if df is not None:
                                             itens_corrigidos += 1
                                 salvar_estoque(df, prefixo)
                                 salvar_logs_em_lote(prefixo, logs_concilia) 
-                                st.success(f"✅ {itens_corrigidos} itens corrigidos!")
+                                st.success(f"✅ {itens_corrigidos} items corrigidos!")
                                 st.rerun()
                         with c_dir:
                             df_export = df_divergente[~df_editor_concilia['✅ Aceitar Qtd Shoppbud (Corrigir App)']].copy()
@@ -1330,6 +1330,9 @@ if df is not None:
                     st.success("Cadastrado!")
                     st.rerun()
 
+    # ==============================================================================
+    # 🔄 XML IMPORTAÇÃO: CORREÇÃO DA CASA (QTD_CENTRAL)
+    # ==============================================================================
     elif modo == "📥 Importar XML (Associação Inteligente)":
         st.title(f"📥 Importar XML")
         df_hist = carregar_historico(prefixo)
@@ -1363,7 +1366,9 @@ if df is not None:
                 for i, item in enumerate(dados['itens']):
                     match_inicial = "(CRIAR NOVO)"
                     if not df.empty:
-                        mask_ean = df['código de barras'].astype(str) == item['ean']
+                        # Limpa os zeros à esquerda para a busca do XML ser mais resiliente
+                        cod_xml_limpo = str(item['ean']).strip().lstrip('0')
+                        mask_ean = df['código de barras'].astype(str).str.strip().str.lstrip('0') == cod_xml_limpo
                         if mask_ean.any(): 
                             match_inicial = f"[SISTEMA] {df.loc[mask_ean, 'código de barras'].values[0]} - {df.loc[mask_ean, 'nome do produto'].values[0]}"
                         else:
@@ -1389,16 +1394,33 @@ if df is not None:
                              nome_final = item['nome'].upper()
 
                         if esc == "(CRIAR NOVO)":
-                            novo = {'código de barras': item['ean'], 'nome do produto': nome_final, 'qtd.estoque': item['qtd'] if "Atualizar" in modo_import else 0, 'qtd_central': 0, 'qtd_minima': 5, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': item['preco_un_liquido'], 'preco_venda': item['preco_un_liquido']*2, 'categoria': 'GERAL', 'ultimo_fornecedor': dados['fornecedor'], 'preco_sem_desconto': item['preco_un_bruto'], 'status': 'Ativo'}
+                            # 🐞 CORREÇÃO DO INVENTÁRIO CASA AQUI 🐞
+                            # A qtd nova vai para 'qtd_central' e NÃO para 'qtd.estoque'
+                            novo = {
+                                'código de barras': item['ean'], 
+                                'nome do produto': nome_final, 
+                                'qtd.estoque': 0, 
+                                'qtd_central': item['qtd'] if "Atualizar" in modo_import else 0, 
+                                'qtd_minima': 5, 
+                                'validade': None, 
+                                'status_compra': 'OK', 
+                                'qtd_comprada': 0, 
+                                'preco_custo': item['preco_un_liquido'], 
+                                'preco_venda': item['preco_un_liquido']*2, 
+                                'categoria': 'GERAL', 
+                                'ultimo_fornecedor': dados['fornecedor'], 
+                                'preco_sem_desconto': item['preco_un_bruto'], 
+                                'status': 'Ativo'
+                            }
                             df = pd.concat([df, pd.DataFrame([novo])], ignore_index=True)
-                            if "Atualizar" in modo_import: logs_xml.append({'data_hora': str(data_lancamento_final), 'produto': nome_final, 'qtd_antes': 0, 'qtd_nova': item['qtd'], 'acao': "XML Novo", 'motivo': "Entrada"})
+                            if "Atualizar" in modo_import: logs_xml.append({'data_hora': str(data_lancamento_final), 'produto': nome_final, 'qtd_antes': 0, 'qtd_nova': item['qtd'], 'acao': "XML Novo", 'motivo': "Entrada Casa"})
                         else:
                             mask = df['nome do produto'].astype(str) == nome_final
                             if mask.any():
                                 idx = df[mask].index[0]
                                 if "Atualizar" in modo_import:
                                     df.at[idx, 'qtd_central'] += item['qtd']
-                                    logs_xml.append({'data_hora': str(data_lancamento_final), 'produto': nome_final, 'qtd_antes': df.at[idx, 'qtd_central']-item['qtd'], 'qtd_nova': df.at[idx, 'qtd_central'], 'acao': "XML Entrada", 'motivo': "Entrada"})
+                                    logs_xml.append({'data_hora': str(data_lancamento_final), 'produto': nome_final, 'qtd_antes': df.at[idx, 'qtd_central']-item['qtd'], 'qtd_nova': df.at[idx, 'qtd_central'], 'acao': "XML Entrada", 'motivo': "Entrada Casa"})
                                 df.at[idx, 'preco_custo'] = item['preco_un_liquido']
                                 df.at[idx, 'ultimo_fornecedor'] = dados['fornecedor'] 
                                 df.at[idx, 'status'] = 'Ativo' 
@@ -1431,7 +1453,7 @@ if df is not None:
             if processar_excel_oficial(arq): st.success("Base atualizada!"); st.rerun()
 
     # ==============================================================================
-    # 🔄 MUDANÇA DA REGRA DE OURO: PLANOGRAMA COM LEITURA INTELIGENTE DE CABEÇALHO E SOMA
+    # 🔄 PLANOGRAMA: LIMPEZA DE ZEROS E AGRUPAMENTO DE LINHAS DUPLICADAS
     # ==============================================================================
     elif modo == "🔄 Sincronizar (Planograma)":
         st.title(f"🔄 Sincronizar - {loja_atual}")
@@ -1439,7 +1461,6 @@ if df is not None:
         if arquivo:
             try:
                 arquivo.seek(0)
-                # Agora lê a primeira linha como cabeçalho para obter os nomes reais das colunas
                 if arquivo.name.endswith('.csv'):
                     try: 
                         df_raw = pd.read_csv(arquivo)
@@ -1453,19 +1474,16 @@ if df is not None:
                 df_raw = pd.DataFrame()
                 
             if not df_raw.empty:
-                # 1. Limpeza a laser: arranca os espaços fantasmas dos nomes das colunas
                 df_raw.columns = df_raw.columns.astype(str).str.strip()
                 cols = df_raw.columns.tolist()
                 cols_lower = [c.lower() for c in cols]
                 
                 def find_idx(keywords, default=0):
-                    # Procura a primeira palavra-chave ideal em todas as colunas
                     for k in keywords:
                         for i, c in enumerate(cols_lower):
                             if k in c: return i
                     return default
                 
-                # Caçadores super treinados! Nunca mais caem no Código de Planograma ou Qtd Padrão
                 idx_barras = find_idx(['barras', 'ean', 'gtin', 'código', 'codigo'], 0)
                 idx_nome = find_idx(['produto', 'nome', 'descrição'], 1 if len(cols)>1 else 0)
                 idx_qtd = find_idx(['estoque', 'físico', 'quantidade real', 'qtd'], len(cols)-1)
@@ -1485,19 +1503,15 @@ if df is not None:
                     novos_prods = []
                     logs_plano = [] 
                     
-                    # --- 2. Limpeza a Laser do Código de Barras ANTES de agrupar ---
+                    # --- Limpeza de Código e Soma Inteligente das Prateleiras ---
                     df_raw[col_barras] = df_raw[col_barras].astype(str).str.replace('.0', '', regex=False).str.strip()
                     df_raw = df_raw[df_raw[col_barras] != ""]
-                    df_raw = df_raw[df_raw[col_barras] != "NAN"]
-                    df_raw = df_raw[df_raw[col_barras] != "NONE"]
+                    df_raw = df_raw[df_raw[col_barras] != "nan"]
+                    df_raw = df_raw[df_raw[col_barras] != "None"]
                     
-                    # --- 3. Soma Inteligente: Agrupa produtos duplicados no mesmo Planograma ---
                     df_raw[col_qtd] = df_raw[col_qtd].apply(parse_num_br)
                     
-                    agg_dict = {
-                        col_nome: 'first',
-                        col_qtd: 'sum'
-                    }
+                    agg_dict = { col_nome: 'first', col_qtd: 'sum' }
                     if col_preco != "(Ignorar)":
                         df_raw[col_preco] = df_raw[col_preco].apply(parse_num_br)
                         agg_dict[col_preco] = 'first'
@@ -1509,12 +1523,14 @@ if df is not None:
                     
                     for i, row in df_agrupado.iterrows():
                         try:
-                            cod = row[col_barras]  # Já está limpo!
+                            cod = row[col_barras]
+                            cod_limpo = cod.lstrip('0') # Limpador de Zeros!
                             nome = normalizar_texto(str(row[col_nome]))
                             qtd = row[col_qtd]
                             
                             if cod and nome:
-                                mask = df['código de barras'] == cod
+                                # Compara ignorando os zeros do Shoppbud e do App
+                                mask = df['código de barras'].astype(str).str.strip().str.lstrip('0') == cod_limpo
                                 if mask.any():
                                     idx = df[mask].index[0]
                                     antigo = df.at[idx, 'qtd.estoque']
@@ -1538,6 +1554,9 @@ if df is not None:
                     st.success("Sincronizado perfeitamente!")
                     st.rerun()
 
+    # ==============================================================================
+    # 📈 VENDAS (MUDANÇA DE BUSCA PARA IGNORAR ZEROS)
+    # ==============================================================================
     elif modo == "📈 Vendas (Importar & 80/20)":
 
         st.title(f"📈 Vendas - Importar & 80/20 ({loja_atual})")
@@ -1548,9 +1567,6 @@ if df is not None:
 
         tab_imp, tab_8020, tab_alertas, tab_hist = st.tabs(["📂 Importar", "📊 80/20 & Comparar Meses", "🚦 Mix (Sem giro)", "📜 Histórico (Nuvem)"])
 
-        # =========================
-        # 📂 IMPORTAÇÃO
-        # =========================
         with tab_imp:
             st.subheader("📂 Importar (Detecção Automática do Tipo de Relatório)")
             st.caption("Você pode subir **Sales (por produto/itens)** e/ou **Sales by Transaction**. O app detecta pelo cabeçalho.")
@@ -1572,10 +1588,10 @@ if df is not None:
                 logs_vendas = []
                 faltas = []
 
-                # Mapa rápido por código e por nome (para match robusto)
                 df_ref = df.copy()
                 df_ref['nome_norm'] = df_ref['nome do produto'].astype(str).apply(normalizar_para_busca)
-                map_cod_to_idx = {str(r['código de barras']).strip(): i for i, r in df_ref.reset_index().iterrows()}
+                # Dicionário blindado ignorando zeros a esquerda
+                map_cod_to_idx = {str(r['código de barras']).strip().lstrip('0'): i for i, r in df_ref.reset_index().iterrows() if str(r['código de barras']).strip()}
                 lista_nomes = df_ref['nome do produto'].astype(str).tolist()
 
                 def detectar_tipo(cols, nome_arquivo: str = ""):
@@ -1617,9 +1633,6 @@ if df is not None:
                         if df_raw.empty: continue
                         tipo = detectar_tipo(df_raw.columns)
 
-                        # -------------------------
-                        # ITENS (por produto)
-                        # -------------------------
                         if tipo == "itens":
                             col_cod = pick_col(df_raw.columns, 'código de barras', 'codigo de barras', 'ean', 'gtin', 'codbarras', 'código barras')
                             col_nome = pick_col(df_raw.columns, 'produto', 'nome do produto', 'item', 'descrição', 'descricao')
@@ -1628,8 +1641,6 @@ if df is not None:
                             col_data = pick_col(df_raw.columns, 'data', 'data da venda', 'data/hora', 'data hora', 'data_hora')
                             col_hora = pick_col(df_raw.columns, 'hora', 'hora da venda')
                             col_trans = pick_col(df_raw.columns, 'id da transação', 'id da transacao', 'transação', 'transacao', 'id transacao', 'id_transacao')
-                            
-                            # ✨ NOVO: Pegar a coluna de Categoria do Shoppbud
                             col_cat = pick_col(df_raw.columns, 'categoria', 'seção', 'secao', 'departamento')
 
                             for _, r in df_raw.iterrows():
@@ -1637,10 +1648,10 @@ if df is not None:
                                 if qtd <= 0: continue
 
                                 cod = str(r.get(col_cod, "") if col_cod else "").replace('.0', '').strip()
+                                cod_limpo = cod.lstrip('0')
                                 nome_raw = str(r.get(col_nome, "") if col_nome else "").strip()
                                 nome_norm = normalizar_texto(nome_raw) if nome_raw else ""
                                 
-                                # Extrai a categoria da linha atual do Shoppbud
                                 categoria_shoppbud = str(r.get(col_cat, "") if col_cat else "").strip()
 
                                 dt_val = None
@@ -1660,8 +1671,9 @@ if df is not None:
                                 preco_unit = (val_total / qtd) if qtd > 0 else 0.0
 
                                 idx_real = None
-                                if cod and cod in map_cod_to_idx:
-                                    idx_real = df_ref.loc[df_ref['código de barras'].astype(str).str.strip() == cod].index[0]
+                                # Busca limpa ignorando zeros
+                                if cod_limpo and cod_limpo in map_cod_to_idx:
+                                    idx_real = map_cod_to_idx[cod_limpo]
                                 elif nome_norm:
                                     melhor, _ = encontrar_melhor_match(nome_norm, lista_nomes, cutoff=0.25)
                                     if melhor:
@@ -1700,12 +1712,10 @@ if df is not None:
                                 if df.at[idx_real, 'status'] == 'Inativo':
                                     df.at[idx_real, 'status'] = 'Ativo'
 
-                                # ✨ NOVO: APRENDIZADO AUTOMÁTICO DE CATEGORIA
                                 if categoria_shoppbud and categoria_shoppbud.upper() != "GERAL":
                                     cat_atual = str(df.at[idx_real, 'categoria']).strip().upper()
                                     if cat_atual in ["", "GERAL", "NAN", "NONE"]:
                                         df.at[idx_real, 'categoria'] = categoria_shoppbud.upper()
-                                # ------------------------------------------------
 
                                 registros_itens.append({
                                     'data_hora': str(dt_val), 'mes_ref': mes_ref, 'transacao': transacao,
@@ -1721,9 +1731,6 @@ if df is not None:
                                 })
                                 total_linhas += 1
 
-                        # -------------------------
-                        # TRANSAÇÕES (financeiro)
-                        # -------------------------
                         elif tipo == "transacoes":
                             cols = [str(c) for c in df_raw.columns]
                             cols_norm = {c: normalizar_para_busca(c) for c in cols}
@@ -1803,9 +1810,6 @@ if df is not None:
                 st.success(f"✅ Importação concluída. Linhas processadas: {total_linhas}.")
                 st.rerun()
 
-        # =========================
-        # 📊 80/20 & COMPARAR
-        # =========================
         with tab_8020:
             df_mensal = carregar_do_google(f"{prefixo}_vendas_mensal_produto")
             if df_mensal.empty:
@@ -1908,9 +1912,6 @@ if df is not None:
                 if not df_vt.empty: st.dataframe(df_vt.sort_values(by='data_hora', ascending=False).head(500), use_container_width=True, hide_index=True)
                 else: st.info("Vazio.")
 
-    # ==============================================================================
-    # 🔄 NOVA REGRA DE OURO APLICADA: RAIO-X DO ESTOQUE (COM MENU INTELIGENTE)
-    # ==============================================================================
     elif modo == "🔎 Raio-X do Estoque (Auditoria)":
         st.title(f"🔎 Raio-X do Estoque - {loja_atual}")
         st.markdown(
@@ -1926,7 +1927,6 @@ if df is not None:
         st.markdown("### 🎛️ Filtros da Auditoria")
         col_cat, col_busca = st.columns(2)
         
-        # Filtro 1: Categoria Inteligente
         if 'categoria' in df.columns:
             lista_categorias = sorted([c for c in df['categoria'].astype(str).unique() if c.strip()])
         else:
@@ -1934,17 +1934,14 @@ if df is not None:
         
         cat_selecionada = col_cat.selectbox("🗂️ Filtrar por Categoria:", ["[ Todas ]"] + lista_categorias)
 
-        # Atualiza a lista da "Busca Estilo Gôndola" em tempo real baseado na categoria
         df_opcoes = df.copy()
         if cat_selecionada != "[ Todas ]":
             df_opcoes = df_opcoes[df_opcoes['categoria'].astype(str).str.upper() == cat_selecionada.upper()]
         
         lista_prods_raiox = sorted((df_opcoes['código de barras'].astype(str) + " - " + df_opcoes['nome do produto'].astype(str)).unique().tolist())
         
-        # Filtro 2: A famosa "Busca Estilo Gôndola"
         busca_raiox = col_busca.selectbox("🔍 Buscar Produto Específico (Menu Rápido):", ["[ Mostrar Todos ]"] + lista_prods_raiox)
 
-        # Filtro 3: Limpar tela (Mostrar só quem movimentou)
         apenas_movimentados = st.checkbox("Mostrar apenas produtos que tiveram movimentação no período (Entrou ou Saiu)", value=True)
 
         if st.button("🚀 GERAR RAIO-X", type="primary"):
@@ -1967,7 +1964,6 @@ if df is not None:
 
                 resultado = []
 
-                # Aplica os filtros escolhidos em cima
                 df_filtrado = df.copy()
                 if cat_selecionada != "[ Todas ]":
                     df_filtrado = df_filtrado[df_filtrado['categoria'].astype(str).str.upper() == cat_selecionada.upper()]
@@ -1978,6 +1974,7 @@ if df is not None:
 
                 for idx, row in df_filtrado.iterrows():
                     cod = str(row.get('código de barras', '')).strip()
+                    cod_limpo = cod.lstrip('0')
                     nome = str(row.get('nome do produto', '')).strip()
 
                     # 1. Contar Compras (XML)
@@ -1989,26 +1986,21 @@ if df is not None:
                     # 2. Contar Vendas (Shoppbud)
                     qtd_venda = 0
                     if not df_v.empty:
-                        mask_v_cod = df_v['código_barras'].astype(str) == cod
+                        # Busca ignorando zeros à esquerda
+                        mask_v_cod = df_v['código_barras'].astype(str).str.lstrip('0') == cod_limpo
                         mask_v_nome = df_v['produto'].astype(str).str.upper() == nome.upper()
-                        mask_v = mask_v_cod | mask_v_nome if cod else mask_v_nome
+                        mask_v = mask_v_cod | mask_v_nome if cod_limpo else mask_v_nome
                         qtd_venda = df_v[mask_v]['qtd_vendida'].sum()
 
-                    # 3. Ignorar parados se a caixa de seleção estiver ativa
                     if apenas_movimentados and qtd_compra == 0 and qtd_venda == 0:
                         continue
 
-                    # 4. Matemática do Saldo
                     saldo = qtd_compra - qtd_venda
 
-                    if saldo > 0:
-                        txt_saldo = f"🟢 Aumentou {int(saldo)} un."
-                    elif saldo < 0:
-                        txt_saldo = f"🔴 Diminuiu {abs(int(saldo))} un."
-                    else:
-                        txt_saldo = "⚪ Ficou igual"
+                    if saldo > 0: txt_saldo = f"🟢 Aumentou {int(saldo)} un."
+                    elif saldo < 0: txt_saldo = f"🔴 Diminuiu {abs(int(saldo))} un."
+                    else: txt_saldo = "⚪ Ficou igual"
 
-                    # 5. Nome visual
                     nome_formatado = f"{cod} - {nome}" if cod else nome
 
                     resultado.append({
@@ -2020,7 +2012,6 @@ if df is not None:
                         "⚖️ Saldo do Período": txt_saldo
                     })
 
-                # Tabela final
                 if resultado:
                     df_res = pd.DataFrame(resultado)
                     st.dataframe(df_res, use_container_width=True, hide_index=True)
