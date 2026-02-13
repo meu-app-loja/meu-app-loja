@@ -535,6 +535,7 @@ def blindar_valor_estoque(df_estoque: pd.DataFrame) -> float:
     custo = pd.to_numeric(df['preco_custo'], errors='coerce').fillna(0).clip(lower=0)
     ativos = df['status'].astype(str) == 'Ativo'
     return float(((q_loja + q_casa) * custo)[ativos].sum())
+
 # --- 🔐 LOG DE AUDITORIA EM LOTE ---
 def registrar_auditoria(prefixo, produto, qtd_antes, qtd_nova, acao, motivo="Manual"):
     try:
@@ -746,9 +747,15 @@ def carregar_vendas_transacoes(prefixo_arquivo):
     except:
         return pd.DataFrame()
 
-def salvar_vendas_itens(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas_itens", permitir_vazio=True)
-def salvar_vendas_transacoes(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas_transacoes", permitir_vazio=True)
-def salvar_vendas_mensal_produto(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas_mensal_produto", permitir_vazio=True)
+def carregar_lista_compras(prefixo_arquivo):
+    try:
+        df = carregar_do_google(f"{prefixo_arquivo}_lista_compras")
+        if df.empty: return pd.DataFrame()
+        if 'código_barras' not in df.columns: df['código_barras'] = ""
+        if 'qtd_sugerida' in df.columns: df['qtd_sugerida'] = pd.to_numeric(df['qtd_sugerida'], errors='coerce')
+        return df
+    except: return pd.DataFrame()
+
 def carregar_mix_review(prefixo_arquivo):
     try:
         df_mr = carregar_do_google(f"{prefixo_arquivo}_mix_review")
@@ -759,8 +766,110 @@ def carregar_mix_review(prefixo_arquivo):
     except:
         return pd.DataFrame(columns=['data_criacao','codigo_barras','produto','status','motivo','ultima_venda','dias_sem_venda','meses_sem_venda','observacao','decisao'])
 
-def salvar_mix_review(df_mix, prefixo_arquivo):
-    salvar_no_google(df_mix, f"{prefixo_arquivo}_mix_review", permitir_vazio=True)
+# --- XML ---
+def ler_xml_nfe(arquivo_xml, df_referencia):
+    tree = ET.parse(arquivo_xml)
+    root = tree.getroot()
+    def tag_limpa(element): return element.tag.split('}')[-1]
+
+    dados_nota = {'numero': '', 'fornecedor': '', 'data_emissao': '', 'itens': []}
+    lista_nomes_ref = []
+    dict_ref_ean = {}
+    if not df_referencia.empty:
+        for idx, row in df_referencia.iterrows():
+            nm = normalizar_texto(row['nome do produto'])
+            ean = str(row['código de barras']).strip()
+            dict_ref_ean[nm] = ean
+            lista_nomes_ref.append(nm)
+
+    if tag_limpa(root) == 'NotaFiscal':
+        info = root.find('Info')
+        if info is not None:
+            dados_nota['numero'] = info.find('NumeroNota').text if info.find('NumeroNota') is not None else ""
+            dados_nota['fornecedor'] = info.find('Fornecedor').text if info.find('Fornecedor') is not None else ""
+            try: dados_nota['data_emissao'] = info.find('DataCompra').text
+            except: pass
+        produtos = root.findall('.//Produtos/Item')
+        for item_xml in produtos:
+            item = {'codigo_interno': '', 'ean': '', 'nome': '', 'qtd': 0.0, 'preco_un_liquido': 0.0, 'preco_un_bruto': 0.0, 'desconto_total_item': 0.0}
+            nome_raw = item_xml.find('Nome').text
+            qtd_raw = float(item_xml.find('Quantidade').text)
+            val_final = float(item_xml.find('ValorPagoFinal').text)
+            desc_val = float(item_xml.find('ValorDesconto').text)
+            cod_barras = item_xml.find('CodigoBarras').text
+            item['nome'] = normalizar_texto(nome_raw)
+            item['qtd'] = qtd_raw
+            item['ean'] = cod_barras if cod_barras else ""
+            item['codigo_interno'] = item['ean']
+            item['desconto_total_item'] = desc_val
+            if qtd_raw > 0:
+                item['preco_un_liquido'] = val_final / qtd_raw
+                item['preco_un_bruto'] = (val_final + desc_val) / qtd_raw
+            
+            ean_xml = str(item['ean']).strip()
+            if ean_xml in ['SEM GTIN', '', 'None', 'NAN']:
+                item['ean'] = item['codigo_interno']
+                if lista_nomes_ref:
+                    melhor_nome, _ = encontrar_melhor_match(item['nome'], lista_nomes_ref)
+                    if melhor_nome: item['ean'] = dict_ref_ean.get(melhor_nome, item['codigo_interno'])
+            dados_nota['itens'].append(item)
+        return dados_nota
+
+    for elem in root.iter():
+        tag = tag_limpa(elem)
+        if tag == 'nNF': dados_nota['numero'] = elem.text
+        elif tag == 'xNome' and dados_nota['fornecedor'] == '': dados_nota['fornecedor'] = elem.text
+        elif tag == 'dhEmi':
+            raw_date = elem.text
+            if raw_date:
+                try:
+                    dt_obj = datetime.strptime(raw_date[:19], "%Y-%m-%dT%H:%M:%S")
+                    dados_nota['data_emissao'] = dt_obj.strftime("%d/%m/%Y %H:%M")
+                except:
+                    dados_nota['data_emissao'] = raw_date 
+
+    dets = [e for e in root.iter() if tag_limpa(e) == 'det']
+    for det in dets:
+        prod = next((child for child in det if tag_limpa(child) == 'prod'), None)
+        if prod:
+            item = {'codigo_interno': '', 'ean': '', 'nome': '', 'qtd': 0.0, 'preco_un_liquido': 0.0, 'preco_un_bruto': 0.0, 'desconto_total_item': 0.0}
+            vProd = 0.0; vDesc = 0.0; qCom = 0.0
+            for info in prod:
+                t = tag_limpa(info)
+                if t == 'cProd': item['codigo_interno'] = info.text
+                elif t == 'cEAN': item['ean'] = info.text
+                elif t == 'xProd': item['nome'] = normalizar_texto(info.text)
+                elif t == 'qCom': qCom = float(info.text)
+                elif t == 'vProd': vProd = float(info.text) 
+                elif t == 'vDesc': vDesc = float(info.text) 
+            if qCom > 0:
+                item['qtd'] = qCom
+                item['preco_un_bruto'] = vProd / qCom  
+                item['desconto_total_item'] = vDesc    
+                item['preco_un_liquido'] = (vProd - vDesc) / qCom 
+            ean_xml = str(item['ean']).strip()
+            if ean_xml in ['SEM GTIN', '', 'None', 'NAN']:
+                item['ean'] = item['codigo_interno']
+                if lista_nomes_ref:
+                    melhor_nome, _ = encontrar_melhor_match(item['nome'], lista_nomes_ref)
+                    if melhor_nome: item['ean'] = dict_ref_ean.get(melhor_nome, item['codigo_interno'])
+            dados_nota['itens'].append(item)
+    return dados_nota
+
+# --- SALVAMENTO ---
+def salvar_estoque(df, prefixo):
+    df_blindado = blindar_estoque_df(df)
+    salvar_no_google(df_blindado, f"{prefixo}_estoque")
+    # mantém sessão sincronizada
+    st.session_state['df_ativo'] = df_blindado
+def salvar_historico(df, prefixo): salvar_no_google(df, f"{prefixo}_historico_compras")
+def salvar_movimentacoes(df, prefixo): salvar_no_google(df, f"{prefixo}_movimentacoes")
+def salvar_vendas(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas")
+def salvar_lista_compras(df, prefixo): salvar_no_google(df, f"{prefixo}_lista_compras", permitir_vazio=True)
+def salvar_vendas_itens(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas_itens", permitir_vazio=True)
+def salvar_vendas_transacoes(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas_transacoes", permitir_vazio=True)
+def salvar_vendas_mensal_produto(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas_mensal_produto", permitir_vazio=True)
+def salvar_mix_review(df_mix, prefixo_arquivo): salvar_no_google(df_mix, f"{prefixo_arquivo}_mix_review", permitir_vazio=True)
 
 
 # ==============================================================================
@@ -850,21 +959,17 @@ if df is not None:
         if 'lote_inventario' not in st.session_state:
             st.session_state['lote_inventario'] = []
 
-        # 1. Busca Rápida e Inteligente
         if not df.empty:
-            # Cria lista combo para busca (Código - Nome)
             lista_nomes_codigos = sorted((df['código de barras'].astype(str) + " - " + df['nome do produto'].astype(str)).unique().tolist())
             
             st.markdown("### 1️⃣ Localizar Produto")
             produto_busca = st.selectbox("🔍 Digite Código ou Nome:", [""] + lista_nomes_codigos, key="busca_inv_lote")
 
-            # 2. Formulário de Entrada
             if produto_busca:
                 parts = produto_busca.split(' - ', 1)
                 cod_sel = parts[0]
                 nome_sel = parts[1]
                 
-                # Pega dados atuais para referência
                 mask = df['código de barras'] == cod_sel
                 qtd_atual = 0
                 val_atual = None
@@ -882,10 +987,9 @@ if df is not None:
                 with c_val:
                     val_nova = st.date_input("Nova Validade:", value=val_atual if pd.notnull(val_atual) else None, key="val_inv_input")
                 with c_btn:
-                    st.write("") # Espaço
-                    st.write("") # Espaço
+                    st.write("") 
+                    st.write("") 
                     if st.button("➕ Adicionar à Lista Temporária", type="primary"):
-                        # Adiciona ao session_state
                         novo_item = {
                             'Código': cod_sel,
                             'Produto': nome_sel,
@@ -895,17 +999,14 @@ if df is not None:
                         }
                         st.session_state['lote_inventario'].append(novo_item)
                         st.success(f"{nome_sel} adicionado à lista!")
-                        # O rerun limpa o input para o próximo
                         st.rerun()
 
-        # 3. Tabela de Revisão (Onde a mágica acontece)
         st.divider()
         st.markdown("### 2️⃣ Revisar Lista Temporária (Antes de Salvar)")
         
         if st.session_state['lote_inventario']:
             df_lote = pd.DataFrame(st.session_state['lote_inventario'])
             
-            # Permite editar a lista temporária caso tenha errado algo
             df_lote_editavel = st.data_editor(
                 df_lote, 
                 use_container_width=True, 
@@ -922,7 +1023,6 @@ if df is not None:
             
             with c_salvar:
                 if st.button("💾 PROCESSAR TUDO AGORA (Salvar na Nuvem)", type="primary"):
-                    # Processamento em Lote
                     logs_inventario = []
                     alteracoes_feitas = 0
                     
@@ -939,11 +1039,9 @@ if df is not None:
                             idx = df[mask].index[0]
                             qtd_antiga = df.at[idx, 'qtd.estoque']
                             
-                            # Atualiza DF principal
                             df.at[idx, 'qtd.estoque'] = nova_q
                             df.at[idx, 'validade'] = pd.to_datetime(nova_v) if nova_v else None
                             
-                            # Log
                             if qtd_antiga != nova_q:
                                 logs_inventario.append({
                                     'data_hora': str(obter_hora_manaus()),
@@ -956,11 +1054,10 @@ if df is not None:
                             alteracoes_feitas += 1
                         bar.progress((i + 1) / total)
 
-                    # Salva no Google UMA VEZ
                     salvar_estoque(df, prefixo)
                     salvar_logs_em_lote(prefixo, logs_inventario)
                     
-                    st.session_state['lote_inventario'] = [] # Limpa a lista
+                    st.session_state['lote_inventario'] = [] 
                     st.balloons()
                     st.success(f"✅ Sucesso! {alteracoes_feitas} produtos atualizados de uma só vez.")
                     st.rerun()
@@ -1065,7 +1162,6 @@ if df is not None:
                                 df.at[idx, 'qtd.estoque'] += qtd_pick
                                 log_movs.append({'data_hora': str(obter_hora_manaus()), 'produto': nome_prod, 'qtd_movida': qtd_pick})
                                 
-                                # PREPARA LOTE
                                 atualizacoes_casa_global.append({'produto': nome_prod, 'qtd_central': df.at[idx, 'qtd_central']})
                                 log_auditoria_buffer.append({'data_hora': str(obter_hora_manaus()), 'produto': nome_prod, 'qtd_antes': qtd_antiga_loja, 'qtd_nova': df.at[idx, 'qtd.estoque'], 'acao': "Transferência Picklist", 'motivo': "Lote"})
                                 movidos += 1
@@ -1077,7 +1173,6 @@ if df is not None:
                         df_mov = pd.concat([df_mov, pd.DataFrame(log_movs)], ignore_index=True)
                         salvar_movimentacoes(df_mov, prefixo)
                     
-                    # SALVA LOTES
                     salvar_logs_em_lote(prefixo, log_auditoria_buffer)
                     atualizar_casa_global_em_lote(atualizacoes_casa_global, prefixo)
                     
@@ -2006,6 +2101,7 @@ if df is not None:
                     df_prod = df_hist[df_hist['produto'] == nome_para_filtro].copy()
                     
                     if not df_prod.empty:
+                        # --- MELHORIA: FILTRAR ZEROS PARA NÃO SUJAR O GRÁFICO ---
                         df_validos = df_prod[df_prod['preco_pago'] > 0.01]
                         if df_validos.empty: df_validos = df_prod 
 
