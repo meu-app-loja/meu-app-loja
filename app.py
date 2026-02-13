@@ -1103,7 +1103,7 @@ if df is not None:
                                             itens_corrigidos += 1
                                 salvar_estoque(df, prefixo)
                                 salvar_logs_em_lote(prefixo, logs_concilia) 
-                                st.success(f"✅ {itens_corrigidos} items corrigidos!")
+                                st.success(f"✅ {itens_corrigidos} itens corrigidos!")
                                 st.rerun()
                         with c_dir:
                             df_export = df_divergente[~df_editor_concilia['✅ Aceitar Qtd Shoppbud (Corrigir App)']].copy()
@@ -1485,16 +1485,21 @@ if df is not None:
                     novos_prods = []
                     logs_plano = [] 
                     
-                    # --- 2. Soma Inteligente: Agrupa produtos duplicados no mesmo Planograma ---
-                    df_raw[col_qtd] = pd.to_numeric(df_raw[col_qtd], errors='coerce').fillna(0)
-                    df_raw = df_raw[df_raw[col_barras].astype(str).str.strip() != ""]
+                    # --- 2. Limpeza a Laser do Código de Barras ANTES de agrupar ---
+                    df_raw[col_barras] = df_raw[col_barras].astype(str).str.replace('.0', '', regex=False).str.strip()
+                    df_raw = df_raw[df_raw[col_barras] != ""]
+                    df_raw = df_raw[df_raw[col_barras] != "NAN"]
+                    df_raw = df_raw[df_raw[col_barras] != "NONE"]
+                    
+                    # --- 3. Soma Inteligente: Agrupa produtos duplicados no mesmo Planograma ---
+                    df_raw[col_qtd] = df_raw[col_qtd].apply(parse_num_br)
                     
                     agg_dict = {
                         col_nome: 'first',
                         col_qtd: 'sum'
                     }
                     if col_preco != "(Ignorar)":
-                        df_raw[col_preco] = pd.to_numeric(df_raw[col_preco], errors='coerce')
+                        df_raw[col_preco] = df_raw[col_preco].apply(parse_num_br)
                         agg_dict[col_preco] = 'first'
                         
                     df_agrupado = df_raw.groupby(col_barras).agg(agg_dict).reset_index()
@@ -1504,7 +1509,7 @@ if df is not None:
                     
                     for i, row in df_agrupado.iterrows():
                         try:
-                            cod = str(row[col_barras]).replace('.0', '').strip()
+                            cod = row[col_barras]  # Já está limpo!
                             nome = normalizar_texto(str(row[col_nome]))
                             qtd = row[col_qtd]
                             
