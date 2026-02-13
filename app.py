@@ -752,132 +752,10 @@ def salvar_vendas_mensal_produto(df, prefixo): salvar_no_google(df, f"{prefixo}_
 def carregar_mix_review(prefixo_arquivo):
     try:
         df_mr = carregar_do_google(f"{prefixo_arquivo}_mix_review")
-        if df_mr.empty: return pd.DataFrame()
-        df_mr.columns = df_mr.columns.str.strip().str.lower()
-        return df_mr
-    except:
-        return pd.DataFrame()
-def salvar_mix_review(df, prefixo): salvar_no_google(df, f"{prefixo}_mix_review", permitir_vazio=True)
-
-
-def carregar_lista_compras(prefixo_arquivo):
-    try:
-        df = carregar_do_google(f"{prefixo_arquivo}_lista_compras")
-        if df.empty: return pd.DataFrame()
-        if 'código_barras' not in df.columns: df['código_barras'] = ""
-        if 'qtd_sugerida' in df.columns: df['qtd_sugerida'] = pd.to_numeric(df['qtd_sugerida'], errors='coerce')
-        return df
-    except: return pd.DataFrame()
-
-# --- XML ---
-def ler_xml_nfe(arquivo_xml, df_referencia):
-    tree = ET.parse(arquivo_xml)
-    root = tree.getroot()
-    def tag_limpa(element): return element.tag.split('}')[-1]
-
-    dados_nota = {'numero': '', 'fornecedor': '', 'data_emissao': '', 'itens': []}
-    lista_nomes_ref = []
-    dict_ref_ean = {}
-    if not df_referencia.empty:
-        for idx, row in df_referencia.iterrows():
-            nm = normalizar_texto(row['nome do produto'])
-            ean = str(row['código de barras']).strip()
-            dict_ref_ean[nm] = ean
-            lista_nomes_ref.append(nm)
-
-    if tag_limpa(root) == 'NotaFiscal':
-        info = root.find('Info')
-        if info is not None:
-            dados_nota['numero'] = info.find('NumeroNota').text if info.find('NumeroNota') is not None else ""
-            dados_nota['fornecedor'] = info.find('Fornecedor').text if info.find('Fornecedor') is not None else ""
-            try: dados_nota['data_emissao'] = info.find('DataCompra').text
-            except: pass
-        produtos = root.findall('.//Produtos/Item')
-        for item_xml in produtos:
-            item = {'codigo_interno': '', 'ean': '', 'nome': '', 'qtd': 0.0, 'preco_un_liquido': 0.0, 'preco_un_bruto': 0.0, 'desconto_total_item': 0.0}
-            nome_raw = item_xml.find('Nome').text
-            qtd_raw = float(item_xml.find('Quantidade').text)
-            val_final = float(item_xml.find('ValorPagoFinal').text)
-            desc_val = float(item_xml.find('ValorDesconto').text)
-            cod_barras = item_xml.find('CodigoBarras').text
-            item['nome'] = normalizar_texto(nome_raw)
-            item['qtd'] = qtd_raw
-            item['ean'] = cod_barras if cod_barras else ""
-            item['codigo_interno'] = item['ean']
-            item['desconto_total_item'] = desc_val
-            if qtd_raw > 0:
-                item['preco_un_liquido'] = val_final / qtd_raw
-                item['preco_un_bruto'] = (val_final + desc_val) / qtd_raw
-            
-            ean_xml = str(item['ean']).strip()
-            if ean_xml in ['SEM GTIN', '', 'None', 'NAN']:
-                item['ean'] = item['codigo_interno']
-                if lista_nomes_ref:
-                    melhor_nome, _ = encontrar_melhor_match(item['nome'], lista_nomes_ref)
-                    if melhor_nome: item['ean'] = dict_ref_ean.get(melhor_nome, item['codigo_interno'])
-            dados_nota['itens'].append(item)
-        return dados_nota
-
-    for elem in root.iter():
-        tag = tag_limpa(elem)
-        if tag == 'nNF': dados_nota['numero'] = elem.text
-        elif tag == 'xNome' and dados_nota['fornecedor'] == '': dados_nota['fornecedor'] = elem.text
-        elif tag == 'dhEmi':
-            raw_date = elem.text
-            if raw_date:
-                try:
-                    dt_obj = datetime.strptime(raw_date[:19], "%Y-%m-%dT%H:%M:%S")
-                    dados_nota['data_emissao'] = dt_obj.strftime("%d/%m/%Y %H:%M")
-                except:
-                    dados_nota['data_emissao'] = raw_date 
-
-    dets = [e for e in root.iter() if tag_limpa(e) == 'det']
-    for det in dets:
-        prod = next((child for child in det if tag_limpa(child) == 'prod'), None)
-        if prod:
-            item = {'codigo_interno': '', 'ean': '', 'nome': '', 'qtd': 0.0, 'preco_un_liquido': 0.0, 'preco_un_bruto': 0.0, 'desconto_total_item': 0.0}
-            vProd = 0.0; vDesc = 0.0; qCom = 0.0
-            for info in prod:
-                t = tag_limpa(info)
-                if t == 'cProd': item['codigo_interno'] = info.text
-                elif t == 'cEAN': item['ean'] = info.text
-                elif t == 'xProd': item['nome'] = normalizar_texto(info.text)
-                elif t == 'qCom': qCom = float(info.text)
-                elif t == 'vProd': vProd = float(info.text) 
-                elif t == 'vDesc': vDesc = float(info.text) 
-            if qCom > 0:
-                item['qtd'] = qCom
-                item['preco_un_bruto'] = vProd / qCom  
-                item['desconto_total_item'] = vDesc    
-                item['preco_un_liquido'] = (vProd - vDesc) / qCom 
-            ean_xml = str(item['ean']).strip()
-            if ean_xml in ['SEM GTIN', '', 'None', 'NAN']:
-                item['ean'] = item['codigo_interno']
-                if lista_nomes_ref:
-                    melhor_nome, _ = encontrar_melhor_match(item['nome'], lista_nomes_ref)
-                    if melhor_nome: item['ean'] = dict_ref_ean.get(melhor_nome, item['codigo_interno'])
-            dados_nota['itens'].append(item)
-    return dados_nota
-
-# --- SALVAMENTO ---
-def salvar_estoque(df, prefixo):
-    df_blindado = blindar_estoque_df(df)
-    salvar_no_google(df_blindado, f"{prefixo}_estoque")
-    # mantém sessão sincronizada
-    st.session_state['df_ativo'] = df_blindado
-def salvar_historico(df, prefixo): salvar_no_google(df, f"{prefixo}_historico_compras")
-def salvar_movimentacoes(df, prefixo): salvar_no_google(df, f"{prefixo}_movimentacoes")
-def salvar_vendas(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas")
-def salvar_lista_compras(df, prefixo): salvar_no_google(df, f"{prefixo}_lista_compras", permitir_vazio=True)
-
-# --- MIX REVIEW (CURVA 80/20, MENOS VENDIDOS, SEM VENDA) ---
-def carregar_mix_review(prefixo_arquivo):
-    try:
-        df_m = carregar_do_google(f"{prefixo_arquivo}_mix_review")
-        if df_m.empty:
+        if df_mr.empty:
             return pd.DataFrame(columns=['data_criacao','codigo_barras','produto','status','motivo','ultima_venda','dias_sem_venda','meses_sem_venda','observacao','decisao'])
-        df_m.columns = df_m.columns.str.strip()
-        return df_m
+        df_mr.columns = df_mr.columns.str.strip()
+        return df_mr
     except:
         return pd.DataFrame(columns=['data_criacao','codigo_barras','produto','status','motivo','ultima_venda','dias_sem_venda','meses_sem_venda','observacao','decisao'])
 
@@ -913,6 +791,7 @@ if df is not None:
         "⚙️ Configurar Base Oficial",
         "🔄 Sincronizar (Planograma)",
         "📈 Vendas (Importar & 80/20)",
+        "🔎 Raio-X do Estoque (Auditoria)",
         "🏠 Gôndola (Loja)", 
         "💰 Inteligência de Compras (Histórico)",
         "🏡 Estoque Central (Casa)",
@@ -1546,68 +1425,48 @@ if df is not None:
                 lista_nomes = df_ref['nome do produto'].astype(str).tolist()
 
                 def detectar_tipo(cols, nome_arquivo: str = ""):
-                    """Retorna 'itens', 'transacoes' ou 'desconhecido'.
-
-                    - 'itens': relatório por item/produto (tem PRODUTO + QTD)
-                    - 'transacoes': relatório por transação (tem SUBTOTAL/TOTAL + ID TRANSACAO)
-
-                    Observação: alguns arquivos do Shoppbud mudam o cabeçalho. Esta função tolera variações.
-                    """
                     cols_norm = [normalizar_para_busca(c) for c in cols if c is not None]
                     joined = " | ".join(cols_norm)
 
-                    # Heurística por nome do arquivo (último recurso)
                     nome_norm = normalizar_para_busca(nome_arquivo or "")
                     if "SALES-BY-TRANSACTION" in nome_norm or "BY-TRANSACTION" in nome_norm:
-                        # mesmo se o cabeçalho vier estranho, a intenção do usuário pode estar clara
                         return "transacoes"
                     if nome_norm.startswith("SALES-") and "BY-TRANSACTION" not in nome_norm and "SALES BY TRANSACTION" not in nome_norm:
-                        # geralmente é o relatório de itens
                         return "itens"
 
                     tem_produto = any(("PRODUTO" in c) or ("ITEM" == c) for c in cols_norm)
                     tem_qtd = any(("QTD" in c) or ("QUANT" in c) for c in cols_norm)
                     tem_id_trans = any(("ID" in c and "TRANS" in c) or ("TRANSACAO" in c) for c in cols_norm)
 
-                    # Itens/produtos
-                    if tem_produto and tem_qtd:
-                        return "itens"
-
-                    # Transações (financeiro)
+                    if tem_produto and tem_qtd: return "itens"
+                    
                     tem_subtotal = any("SUBTOTAL" in c for c in cols_norm)
                     tem_total = any((c == "TOTAL") or ("VALOR TOTAL" in c) or ("TOTAL" in c and "VALOR" in c) for c in cols_norm)
                     tem_taxa = any(("TAXA" in c) or ("TAXAS" in c) for c in cols_norm)
                     tem_desc = any(("DESC" in c) or ("DESCONTO" in c) for c in cols_norm)
-                    if tem_id_trans and (tem_subtotal or tem_total or tem_taxa or tem_desc):
-                        return "transacoes"
+                    if tem_id_trans and (tem_subtotal or tem_total or tem_taxa or tem_desc): return "transacoes"
 
-                    # fallback: se tem ID transação + data, provavelmente é transações
                     tem_data = any("DATA" == c or "DATA" in c for c in cols_norm)
-                    if tem_id_trans and tem_data:
-                        return "transacoes"
+                    if tem_id_trans and tem_data: return "transacoes"
 
                     return "desconhecido"
 
                 def mes_ref_from_dt(dt_val):
                     try:
-                        if pd.isna(dt_val): 
-                            return ""
+                        if pd.isna(dt_val): return ""
                         return pd.to_datetime(dt_val).strftime("%Y-%m")
-                    except:
-                        return ""
+                    except: return ""
 
                 for arq in arquivos:
                     try:
                         df_raw, header_row_detected, cols_detectadas = ler_excel_com_header_auto(arq)
-                        if df_raw.empty:
-                            continue
+                        if df_raw.empty: continue
                         tipo = detectar_tipo(df_raw.columns)
 
                         # -------------------------
                         # ITENS (por produto)
                         # -------------------------
                         if tipo == "itens":
-                            # Mapeamento robusto de colunas (acentos/pontos/variações do Shoppbud)
                             col_cod = pick_col(df_raw.columns, 'código de barras', 'codigo de barras', 'ean', 'gtin', 'codbarras', 'código barras')
                             col_nome = pick_col(df_raw.columns, 'produto', 'nome do produto', 'item', 'descrição', 'descricao')
                             col_qtd = pick_col(df_raw.columns, 'qtd', 'qtd.', 'quantidade', 'qtd vendida', 'qtde', 'qte')
@@ -1615,17 +1474,21 @@ if df is not None:
                             col_data = pick_col(df_raw.columns, 'data', 'data da venda', 'data/hora', 'data hora', 'data_hora')
                             col_hora = pick_col(df_raw.columns, 'hora', 'hora da venda')
                             col_trans = pick_col(df_raw.columns, 'id da transação', 'id da transacao', 'transação', 'transacao', 'id transacao', 'id_transacao')
+                            
+                            # ✨ NOVO: Pegar a coluna de Categoria do Shoppbud
+                            col_cat = pick_col(df_raw.columns, 'categoria', 'seção', 'secao', 'departamento')
 
                             for _, r in df_raw.iterrows():
                                 qtd = parse_num_br(r.get(col_qtd, 0), default=0)
-                                if qtd <= 0:
-                                    continue
+                                if qtd <= 0: continue
 
                                 cod = str(r.get(col_cod, "") if col_cod else "").replace('.0', '').strip()
                                 nome_raw = str(r.get(col_nome, "") if col_nome else "").strip()
                                 nome_norm = normalizar_texto(nome_raw) if nome_raw else ""
+                                
+                                # Extrai a categoria da linha atual do Shoppbud
+                                categoria_shoppbud = str(r.get(col_cat, "") if col_cat else "").strip()
 
-                                # Data/hora
                                 dt_val = None
                                 try:
                                     if col_data and col_hora and pd.notna(r.get(col_data)) and pd.notna(r.get(col_hora)):
@@ -1634,18 +1497,14 @@ if df is not None:
                                         dt_val = pd.to_datetime(r.get(col_data), errors='coerce')
                                     elif col_hora and pd.notna(r.get(col_hora)):
                                         dt_val = pd.to_datetime(r.get(col_hora), errors='coerce')
-                                except:
-                                    dt_val = None
-                                if dt_val is None or pd.isna(dt_val):
-                                    dt_val = obter_hora_manaus()
+                                except: dt_val = None
+                                if dt_val is None or pd.isna(dt_val): dt_val = obter_hora_manaus()
 
                                 mes_ref = mes_ref_from_dt(dt_val)
                                 transacao = str(r.get(col_trans, "") if col_trans else "").strip()
-
                                 val_total = parse_num_br(r.get(col_val_total, 0) if col_val_total else 0, default=0)
                                 preco_unit = (val_total / qtd) if qtd > 0 else 0.0
 
-                                # Match no estoque: prioriza código; fallback por nome.
                                 idx_real = None
                                 if cod and cod in map_cod_to_idx:
                                     idx_real = df_ref.loc[df_ref['código de barras'].astype(str).str.strip() == cod].index[0]
@@ -1654,7 +1513,6 @@ if df is not None:
                                     if melhor:
                                         idx_real = df_ref.loc[df_ref['nome do produto'] == melhor].index[0]
 
-                                # Se não achou, registra mas não baixa estoque
                                 if idx_real is None:
                                     registros_itens.append({
                                         'data_hora': str(dt_val), 'mes_ref': mes_ref, 'transacao': transacao,
@@ -1664,7 +1522,6 @@ if df is not None:
                                     })
                                     continue
 
-                                # Baixa estoque com blindagem
                                 nome_sis = df.at[idx_real, 'nome do produto']
                                 qtd_loja = float(df.at[idx_real, 'qtd.estoque'])
                                 qtd_casa = float(df.at[idx_real, 'qtd_central'])
@@ -1681,19 +1538,20 @@ if df is not None:
                                     df.at[idx_real, 'qtd_central'] = qtd_casa - baixa_casa
                                     resto = max(0.0, resto - baixa_casa)
 
-                                # Se ainda sobrar, significa venda maior que estoque registrado
                                 if resto > 0:
                                     faltas.append({'produto': nome_sis, 'código_barras': df.at[idx_real, 'código de barras'], 'faltou': resto, 'arquivo': arq.name})
-                                    if bloquear_negativos:
-                                        # não faz mais nada; já ficou no mínimo 0
-                                        pass
-                                    else:
-                                        # permite negativo (não recomendado)
+                                    if not bloquear_negativos:
                                         df.at[idx_real, 'qtd.estoque'] -= resto
 
-                                # Reativar se vendeu
                                 if df.at[idx_real, 'status'] == 'Inativo':
                                     df.at[idx_real, 'status'] = 'Ativo'
+
+                                # ✨ NOVO: APRENDIZADO AUTOMÁTICO DE CATEGORIA
+                                if categoria_shoppbud and categoria_shoppbud.upper() != "GERAL":
+                                    cat_atual = str(df.at[idx_real, 'categoria']).strip().upper()
+                                    if cat_atual in ["", "GERAL", "NAN", "NONE"]:
+                                        df.at[idx_real, 'categoria'] = categoria_shoppbud.upper()
+                                # ------------------------------------------------
 
                                 registros_itens.append({
                                     'data_hora': str(dt_val), 'mes_ref': mes_ref, 'transacao': transacao,
@@ -1719,8 +1577,7 @@ if df is not None:
                             def pick(keywords):
                                 for c in cols:
                                     cn = cols_norm.get(c, "")
-                                    if any(k in cn for k in keywords):
-                                        return c
+                                    if any(k in cn for k in keywords): return c
                                 return None
                             
                             col_trans = pick(["ID DA TRANSACAO", "ID TRANSACAO", "TRANSACAO", "ID DO PEDIDO", "PEDIDO"])
@@ -1733,8 +1590,7 @@ if df is not None:
                             for _, r in df_raw.iterrows():
                                 transacao = str(r.get(col_trans, "")).strip() if col_trans else ""
                                 dt_val = pd.to_datetime(r.get(col_hora), errors='coerce') if col_hora else pd.NaT
-                                if pd.isna(dt_val):
-                                    dt_val = obter_hora_manaus()
+                                if pd.isna(dt_val): dt_val = obter_hora_manaus()
 
                                 mes_ref = mes_ref_from_dt(dt_val)
                                 subtotal = parse_num_br(r.get(col_sub, 0) if col_sub else 0, default=0)
@@ -1750,49 +1606,30 @@ if df is not None:
                                 total_linhas += 1
                         else:
                             st.warning(f"⚠️ Não consegui identificar o tipo do arquivo: {arq.name}.")
-                            st.caption("Dica: o app reconhece 2 formatos do Shoppbud: (1) **Sales (itens/produtos)** e (2) **Sales by Transaction (transações)**. "
-                                            "Se o arquivo tiver linhas de título acima do cabeçalho, confira se a exportação veio sem linhas extras. "
-                                            "Abaixo estão as primeiras colunas lidas para ajudar a diagnosticar.")
-                            try:
-                                st.write("Colunas lidas (parcial):", list(df.columns)[:30])
-                            except Exception:
-                                pass
-                            st.info("Para **80/20** e **Mix (sem giro)** o app precisa do arquivo **Sales (itens/produtos)**. "
-                                            "O arquivo **Sales by Transaction** sozinho não tem a lista de produtos vendida (apenas totais por transação).")
                     except Exception as e:
                         st.error(f"Erro ao processar {arq.name}: {e}")
 
-                # Salva estoque + logs
                 salvar_estoque(df, prefixo)
-                if logs_vendas:
-                    salvar_logs_em_lote(prefixo, logs_vendas)
+                if logs_vendas: salvar_logs_em_lote(prefixo, logs_vendas)
 
-                # Salva vendas na nuvem (append + dedup)
                 if registros_itens:
                     df_new = pd.DataFrame(registros_itens)
-                    if not df_vi.empty:
-                        df_all = pd.concat([df_vi, df_new], ignore_index=True)
-                    else:
-                        df_all = df_new
-                    # dedup: transacao + produto + data_hora + qtd + valor
+                    if not df_vi.empty: df_all = pd.concat([df_vi, df_new], ignore_index=True)
+                    else: df_all = df_new
                     cols_dedup = [c for c in ['transacao','produto','data_hora','qtd_vendida','valor_total'] if c in df_all.columns]
-                    if cols_dedup:
-                        df_all = df_all.drop_duplicates(subset=cols_dedup, keep='last')
+                    if cols_dedup: df_all = df_all.drop_duplicates(subset=cols_dedup, keep='last')
                     salvar_vendas_itens(df_all, prefixo)
 
                 if registros_trans:
                     df_new = pd.DataFrame(registros_trans)
-                    if not df_vt.empty:
-                        df_all = pd.concat([df_vt, df_new], ignore_index=True)
-                    else:
-                        df_all = df_new
+                    if not df_vt.empty: df_all = pd.concat([df_vt, df_new], ignore_index=True)
+                    else: df_all = df_new
                     cols_dedup = [c for c in ['transacao'] if c in df_all.columns]
                     if cols_dedup:
                         df_all['transacao'] = df_all['transacao'].astype(str)
                         df_all = df_all.drop_duplicates(subset=cols_dedup, keep='last')
                     salvar_vendas_transacoes(df_all, prefixo)
 
-                # Atualiza tabela mensal por produto (cache/rápido)
                 df_vi2 = carregar_vendas_itens(prefixo)
                 if not df_vi2.empty:
                     df_vi2['data_hora'] = pd.to_datetime(df_vi2['data_hora'], errors='coerce')
@@ -1818,7 +1655,7 @@ if df is not None:
         with tab_8020:
             df_mensal = carregar_do_google(f"{prefixo}_vendas_mensal_produto")
             if df_mensal.empty:
-                st.info("Sem dados de **itens vendidos** ainda. Importe o relatório **Sales (itens/produtos)** na aba 'Importar'. Se você importou apenas **Sales by Transaction**, ele salva o financeiro, mas não alimenta 80/20/Mix.")
+                st.info("Sem dados de itens vendidos.")
             else:
                 df_mensal.columns = df_mensal.columns.str.strip().str.lower()
                 for c in ['qtd_vendida','valor_total']:
@@ -1832,25 +1669,19 @@ if df is not None:
                     st.info("Sem referência de mês nas vendas.")
                 else:
                     c1, c2 = st.columns(2)
-                    with c1:
-                        mes_ini = st.selectbox("Mês inicial", meses, index=max(0, len(meses)-1))
-                    with c2:
-                        mes_fim = st.selectbox("Mês final", meses, index=max(0, len(meses)-1))
+                    with c1: mes_ini = st.selectbox("Mês inicial", meses, index=max(0, len(meses)-1))
+                    with c2: mes_fim = st.selectbox("Mês final", meses, index=max(0, len(meses)-1))
 
                     df_periodo = df_mensal[(df_mensal['mes_ref'] >= mes_ini) & (df_mensal['mes_ref'] <= mes_fim)].copy()
-                    if df_periodo.empty:
-                        st.warning("Período sem vendas.")
+                    if df_periodo.empty: st.warning("Período sem vendas.")
                     else:
                         st.markdown("### 🧮 80/20 (Curva ABC)")
                         df_rank = df_periodo.groupby(['produto','código_barras'], dropna=False).agg(
-                            qtd_vendida=('qtd_vendida','sum'),
-                            valor_total=('valor_total','sum'),
-                            ultima_venda=('ultima_venda','max')
+                            qtd_vendida=('qtd_vendida','sum'), valor_total=('valor_total','sum'), ultima_venda=('ultima_venda','max')
                         ).reset_index().sort_values(by='valor_total', ascending=False)
 
                         total_val = df_rank['valor_total'].sum()
-                        if total_val <= 0:
-                            st.warning("Valor total zerado. Verifique as colunas de valor na planilha exportada.")
+                        if total_val <= 0: st.warning("Valor total zerado.")
                         else:
                             df_rank['pct'] = df_rank['valor_total'] / total_val
                             df_rank['pct_acum'] = df_rank['pct'].cumsum()
@@ -1859,128 +1690,43 @@ if df is not None:
                             topA = df_rank[df_rank['classe']=='A']
                             st.metric("Produtos Classe A (≈80% do valor)", len(topA))
 
-                            st.markdown("#### 🔎 Buscar no ranking (nome ou código de barras)")
                             busca_rank = st.text_input("Digite parte do nome ou 4+ dígitos do código de barras", key="busca_rank_8020")
                             df_rank_f = filtrar_df_busca_robusta(df_rank, busca_rank, cols_text=['produto'], cols_barcode=['código_barras'])
 
-                            # rótulo com nome + código para não haver dúvida
                             df_rank_f = df_rank_f.copy()
                             df_rank_f['código_barras'] = df_rank_f['código_barras'].map(limpar_codigo_barras)
                             df_rank_f['produto_label'] = df_rank_f.apply(
-                                lambda r: f"{r.get('produto','')} [{r.get('código_barras','')}]" if r.get('código_barras','') else str(r.get('produto','')),
-                                axis=1
+                                lambda r: f"{r.get('produto','')} [{r.get('código_barras','')}]" if r.get('código_barras','') else str(r.get('produto','')), axis=1
                             )
 
-                            st.markdown("#### 📌 Top 15 por valor (didático)")
+                            st.markdown("#### 📌 Top 15 por valor")
                             df_top = df_rank_f.head(15).copy()
-                            fig_top = px.bar(
-                                df_top.sort_values('valor_total', ascending=True),
-                                x='valor_total',
-                                y='produto_label',
-                                orientation='h',
-                                title='Top 15 (valor total) – nome + código de barras'
-                            )
+                            fig_top = px.bar(df_top.sort_values('valor_total', ascending=True), x='valor_total', y='produto_label', orientation='h')
                             fig_top.update_layout(xaxis_title='R$ (valor total)', yaxis_title='Produto')
                             st.plotly_chart(fig_top, use_container_width=True)
 
                             st.markdown("#### 📋 Tabela (Top 30)")
                             df_show = df_rank_f.head(30).copy()
-                            if 'pct' in df_show.columns:
-                                df_show['pct_fmt'] = df_show['pct'].map(lambda v: "—" if pd.isna(v) else f"{(v*100):.1f}%")
-                            else:
-                                df_show['pct_fmt'] = "—"
-                            if 'pct_acumulado' in df_show.columns:
-                                df_show['pct_acum_fmt'] = df_show['pct_acumulado'].map(lambda v: "—" if pd.isna(v) else f"{(v*100):.1f}%")
-                            else:
-                                df_show['pct_acum_fmt'] = "—"
-
+                            df_show['pct_fmt'] = df_show.get('pct', pd.Series()).map(lambda v: "—" if pd.isna(v) else f"{(v*100):.1f}%")
+                            df_show['pct_acum_fmt'] = df_show.get('pct_acumulado', pd.Series()).map(lambda v: "—" if pd.isna(v) else f"{(v*100):.1f}%")
+                            
                             cols = [c for c in ['classe','produto','código_barras','valor_total','qtd_vendida','pct_fmt','pct_acum_fmt'] if c in df_show.columns]
-                            df_show['código_barras'] = df_show['código_barras'].map(limpar_codigo_barras)
                             if 'valor_total' in df_show.columns:
                                 df_show['valor_total_fmt'] = df_show['valor_total'].map(lambda v: f"R$ {formatar_moeda_br(v)}")
                                 cols = [c if c!='valor_total' else 'valor_total_fmt' for c in cols]
-                            st.dataframe(
-                                df_show[cols].rename(columns={'pct_fmt':'pct (%)','pct_acum_fmt':'pct acumulado (%)','valor_total_fmt':'valor total'}),
-                                use_container_width=True,
-                                hide_index=True
-                            )
+                            st.dataframe(df_show[cols], use_container_width=True, hide_index=True)
 
-                            st.markdown("### 📈 Comparar Vendas por Mês")
-                            df_mes = (
-                                df_periodo.groupby('mes_ref')
-                                .agg(valor_total=('valor_total','sum'), qtd_vendida=('qtd_vendida','sum'))
-                                .reset_index()
-                            )
-                            df_mes['mes_ref'] = df_mes['mes_ref'].astype(str)
-                            df_mes = df_mes.sort_values('mes_ref')
-
-                            # Variação mês a mês (pct = percentual)
-                            df_mes['var_pct_valor'] = df_mes['valor_total'].pct_change() * 100
-                            df_mes['var_pct_qtd'] = df_mes['qtd_vendida'].pct_change() * 100
-
-                            st.markdown("### 📊 Comparar Vendas por Mês")
-
-                            c1, c2, c3 = st.columns(3)
-                            c1.metric("Total vendido (período)", f"R$ {formatar_moeda_br(df_mes['valor_total'].sum())}")
-                            c2.metric("Qtd. vendida (período)", f"{int(df_mes['qtd_vendida'].sum())}")
-                            ticket = (df_mes['valor_total'].sum() / df_mes['qtd_vendida'].sum()) if df_mes['qtd_vendida'].sum() else 0
-                            c3.metric("Ticket médio (R$/item)", f"R$ {formatar_moeda_br(ticket)}")
-
-                            # Gráfico 1: Total vendido por mês (barras, mais legível)
-                            fig1 = px.bar(
-                                df_mes,
-                                x='mes_ref',
-                                y='valor_total',
-                                text=df_mes['valor_total'].round(2),
-                                title='Valor total vendido por mês'
-                            )
-                            fig1.update_traces(textposition='outside')
-                            fig1.update_layout(xaxis_title='Mês (YYYY-MM)', yaxis_title='R$ (total)')
-                            st.plotly_chart(fig1, use_container_width=True)
-
-                            # Gráfico 2: Quantidade vendida por mês (barras)
-                            fig2 = px.bar(
-                                df_mes,
-                                x='mes_ref',
-                                y='qtd_vendida',
-                                text=df_mes['qtd_vendida'].astype(int),
-                                title='Quantidade vendida por mês'
-                            )
-                            fig2.update_traces(textposition='outside')
-                            fig2.update_layout(xaxis_title='Mês (YYYY-MM)', yaxis_title='Quantidade')
-                            st.plotly_chart(fig2, use_container_width=True)
-
-                            # Tabela auxiliar (didática)
-                            df_vis = df_mes.copy()
-                            df_vis['valor_total'] = df_vis['valor_total'].map(lambda v: float(v) if pd.notna(v) else 0.0)
-                            df_vis['valor_total_fmt'] = df_vis['valor_total'].map(lambda v: f"R$ {formatar_moeda_br(v)}")
-                            df_vis['var_pct_valor_fmt'] = df_vis['var_pct_valor'].map(lambda v: "—" if pd.isna(v) else f"{v:.1f}%")
-                            df_vis['var_pct_qtd_fmt'] = df_vis['var_pct_qtd'].map(lambda v: "—" if pd.isna(v) else f"{v:.1f}%")
-                            st.dataframe(
-                                df_vis[['mes_ref','valor_total_fmt','qtd_vendida','var_pct_valor_fmt','var_pct_qtd_fmt']]
-                                .rename(columns={'mes_ref':'mês','valor_total_fmt':'total vendido','qtd_vendida':'qtd vendida','var_pct_valor_fmt':'Δ% total','var_pct_qtd_fmt':'Δ% qtd'}),
-                                use_container_width=True,
-                                height=220
-                            )
-
-
-        # =========================
-        # 🚦 MIX REVIEW (SEM GIRO)
-        # =========================
         with tab_alertas:
             st.subheader("🚦 Mix: produtos sem giro / menos vendidos")
             df_vi = carregar_vendas_itens(prefixo)
-            if df_vi.empty:
-                st.info("Sem dados de **itens vendidos** ainda. Importe o relatório **Sales (itens/produtos)** na aba 'Importar'.")
+            if df_vi.empty: st.info("Sem dados de vendas.")
             else:
                 df_vi['data_hora'] = pd.to_datetime(df_vi['data_hora'], errors='coerce')
                 ultima = df_vi.groupby(['produto','código_barras'], dropna=False)['data_hora'].max().reset_index()
                 hoje = obter_hora_manaus()
-
                 dias_padrao = st.number_input("Considerar 'sem giro' após quantos dias?", min_value=7, value=60)
                 ultima['dias_sem_venda'] = (hoje - ultima['data_hora']).dt.days
 
-                # junta com estoque atual
                 df_est = df[['nome do produto','código de barras','qtd.estoque','qtd_central','status']].copy()
                 df_est.columns = ['produto','código_barras_est','qtd_loja','qtd_casa','status_prod']
                 df_est['qtd_estoque_total'] = df_est['qtd_loja'].astype(float) + df_est['qtd_casa'].astype(float)
@@ -1989,43 +1735,8 @@ if df is not None:
                 df_mix['status_giro'] = df_mix['dias_sem_venda'].apply(lambda d: 'Sem giro' if d >= dias_padrao else ('Atenção' if d >= int(dias_padrao*0.6) else 'OK'))
                 df_mix = df_mix.sort_values(by=['status_giro','dias_sem_venda'], ascending=[True, False])
 
-                st.dataframe(df_mix[['produto','código_barras','status_giro','dias_sem_venda','qtd_estoque_total','status_prod']].head(200),
-                             use_container_width=True, hide_index=True)
+                st.dataframe(df_mix[['produto','código_barras','status_giro','dias_sem_venda','qtd_estoque_total','status_prod']].head(200), use_container_width=True, hide_index=True)
 
-                st.markdown("### 📝 Lista de revisão (persistente)")
-                df_mr = carregar_mix_review(prefixo)
-                # Gera/atualiza sugestão
-                candidatos = df_mix[df_mix['status_giro']=='Sem giro'].copy()
-                if not candidatos.empty:
-                    candidatos['acao_sugerida'] = candidatos.apply(
-                        lambda r: 'Avaliar retirada do mix' if (parse_num_br(r.get('qtd_estoque_total',0)) > 0) else 'Sem estoque, pode remover do planograma', axis=1
-                    )
-                    candidatos['decisao'] = ''
-                    candidatos['observacoes'] = ''
-                    candidatos['atualizado_em'] = str(hoje)
-                    candidatos = candidatos.rename(columns={'código_barras':'código_barras'})
-                    candidatos = candidatos[['produto','código_barras','status_giro','dias_sem_venda','qtd_estoque_total','acao_sugerida','decisao','observacoes','atualizado_em']]
-                    if df_mr.empty:
-                        df_mr2 = candidatos
-                    else:
-                        df_mr2 = pd.concat([df_mr, candidatos], ignore_index=True)
-                        df_mr2 = df_mr2.drop_duplicates(subset=['produto','código_barras'], keep='last')
-                    salvar_mix_review(df_mr2, prefixo)
-                    st.success(f"Lista de revisão atualizada: {len(candidatos)} itens sem giro.")
-                    df_mr = df_mr2
-
-                if not df_mr.empty:
-                    st.caption("Edite decisões e observações. Depois clique em salvar.")
-                    df_edit = st.data_editor(df_mr, use_container_width=True, num_rows="dynamic", key="mix_review_editor")
-                    if st.button("💾 Salvar Decisões do Mix"):
-                        salvar_mix_review(df_edit, prefixo)
-                        st.success("Salvo.")
-                else:
-                    st.info("Ainda não há itens na lista de revisão.")
-
-        # =========================
-        # 📜 HISTÓRICO
-        # =========================
         with tab_hist:
             st.subheader("📜 Histórico de vendas salvo na nuvem")
             c1, c2 = st.columns(2)
@@ -2034,23 +1745,124 @@ if df is not None:
                 df_vi = carregar_vendas_itens(prefixo)
                 if not df_vi.empty:
                     busca = st.text_input("Buscar (itens):", key="busca_vi")
-                    if busca:
-                        df_vi_show = filtrar_dados_inteligente(df_vi, 'produto', busca)
-                    else:
-                        df_vi_show = df_vi
+                    df_vi_show = filtrar_dados_inteligente(df_vi, 'produto', busca) if busca else df_vi
                     st.dataframe(df_vi_show.sort_values(by='data_hora', ascending=False).head(500), use_container_width=True, hide_index=True)
-                else:
-                    st.info("Vazio.")
+                else: st.info("Vazio.")
             with c2:
                 st.markdown("**Transações (financeiro)**")
                 df_vt = carregar_vendas_transacoes(prefixo)
-                if not df_vt.empty:
-                    st.dataframe(df_vt.sort_values(by='data_hora', ascending=False).head(500), use_container_width=True, hide_index=True)
+                if not df_vt.empty: st.dataframe(df_vt.sort_values(by='data_hora', ascending=False).head(500), use_container_width=True, hide_index=True)
+                else: st.info("Vazio.")
+
+    # ==============================================================================
+    # 🔎 NOVO: RAIO-X DO ESTOQUE (AUDITORIA INTELIGENTE)
+    # ==============================================================================
+    elif modo == "🔎 Raio-X do Estoque (Auditoria)":
+        st.title(f"🔎 Raio-X do Estoque - {loja_atual}")
+        st.markdown(
+            "Selecione um período para cruzar as **Entradas (Compras/XML)** com as **Saídas (Vendas/Shoppbud)** "
+            "e descobrir exatamente o que deveria ter acontecido com o seu estoque."
+        )
+
+        c1, c2 = st.columns(2)
+        hoje = obter_hora_manaus().date()
+        dt_ini = c1.date_input("📅 Data Inicial:", hoje - timedelta(days=2))
+        dt_fim = c2.date_input("📅 Data Final:", hoje)
+        
+        st.markdown("### 🎛️ Filtros da Auditoria")
+        col_busca, col_cat = st.columns(2)
+        
+        # Filtro 1: Busca Robusta (Texto ou Código de Barras)
+        busca_raiox = col_busca.text_input("🔍 Buscar Produto (Nome ou Código de Barras):", placeholder="Ex: coca ou 789...")
+        
+        # Filtro 2: Categoria Inteligente
+        if 'categoria' in df.columns:
+            lista_categorias = sorted([c for c in df['categoria'].astype(str).unique() if c.strip()])
+        else:
+            lista_categorias = []
+        
+        cat_selecionada = col_cat.selectbox("🗂️ Filtrar por Categoria:", ["Todas"] + lista_categorias)
+
+        # Filtro 3: Limpar tela (Mostrar só quem movimentou)
+        apenas_movimentados = st.checkbox("Mostrar apenas produtos que tiveram movimentação no período (Entrou ou Saiu)", value=True)
+
+        if st.button("🚀 GERAR RAIO-X", type="primary"):
+            with st.spinner("Analisando os históricos de Compras e Vendas..."):
+                df_c = carregar_historico(prefixo)
+                df_v = carregar_vendas_itens(prefixo)
+
+                if not df_c.empty and 'data' in df_c.columns:
+                    df_c['data'] = pd.to_datetime(df_c['data'], errors='coerce')
+                if not df_v.empty and 'data_hora' in df_v.columns:
+                    df_v['data_hora'] = pd.to_datetime(df_v['data_hora'], errors='coerce')
+
+                dt_ini_full = datetime.combine(dt_ini, datetime.min.time())
+                dt_fim_full = datetime.combine(dt_fim, datetime.max.time())
+
+                if not df_c.empty:
+                    df_c = df_c[(df_c['data'] >= dt_ini_full) & (df_c['data'] <= dt_fim_full)]
+                if not df_v.empty:
+                    df_v = df_v[(df_v['data_hora'] >= dt_ini_full) & (df_v['data_hora'] <= dt_fim_full)]
+
+                resultado = []
+
+                # Aplica os filtros na base antes de calcular para ficar super rápido
+                df_filtrado = df.copy()
+                if busca_raiox:
+                    df_filtrado = filtrar_dados_inteligente(df_filtrado, 'nome do produto', busca_raiox)
+                if cat_selecionada != "Todas":
+                    df_filtrado = df_filtrado[df_filtrado['categoria'].astype(str).str.upper() == cat_selecionada.upper()]
+
+                for idx, row in df_filtrado.iterrows():
+                    cod = str(row.get('código de barras', '')).strip()
+                    nome = str(row.get('nome do produto', '')).strip()
+
+                    # 1. Contar Compras (XML)
+                    qtd_compra = 0
+                    if not df_c.empty:
+                        mask_c = df_c['produto'].astype(str).str.upper() == nome.upper()
+                        qtd_compra = df_c[mask_c]['qtd'].sum()
+
+                    # 2. Contar Vendas (Shoppbud)
+                    qtd_venda = 0
+                    if not df_v.empty:
+                        mask_v_cod = df_v['código_barras'].astype(str) == cod
+                        mask_v_nome = df_v['produto'].astype(str).str.upper() == nome.upper()
+                        mask_v = mask_v_cod | mask_v_nome if cod else mask_v_nome
+                        qtd_venda = df_v[mask_v]['qtd_vendida'].sum()
+
+                    # 3. Ignorar parados se o checkbox estiver ativo
+                    if apenas_movimentados and qtd_compra == 0 and qtd_venda == 0:
+                        continue
+
+                    # 4. Matemática do Saldo (Substituindo negativos por palavras)
+                    saldo = qtd_compra - qtd_venda
+
+                    if saldo > 0:
+                        txt_saldo = f"🟢 Aumentou {int(saldo)} un."
+                    elif saldo < 0:
+                        txt_saldo = f"🔴 Diminuiu {abs(int(saldo))} un."
+                    else:
+                        txt_saldo = "⚪ Ficou igual"
+
+                    # 5. Nome visual com o Código de Barras (Pedida do Chef!)
+                    nome_formatado = f"{cod} - {nome}" if cod else nome
+
+                    resultado.append({
+                        "🏷️ Código e Produto": nome_formatado,
+                        "🏪 Loja": int(row.get('qtd.estoque', 0)),
+                        "🏡 Casa": int(row.get('qtd_central', 0)),
+                        "📥 Compras": int(qtd_compra),
+                        "🛍️ Vendas": int(qtd_venda),
+                        "⚖️ Saldo do Período": txt_saldo
+                    })
+
+                # Tabela final
+                if resultado:
+                    df_res = pd.DataFrame(resultado)
+                    st.dataframe(df_res, use_container_width=True, hide_index=True)
                 else:
-                    st.info("Vazio.")
-
-
-
+                    st.info("Nenhum produto encontrado com os filtros selecionados ou nenhuma movimentação no período.")
 
     elif modo == "🏠 Gôndola (Loja)":
         st.title(f"🏠 Gôndola - {loja_atual}")
@@ -2194,7 +2006,6 @@ if df is not None:
                     df_prod = df_hist[df_hist['produto'] == nome_para_filtro].copy()
                     
                     if not df_prod.empty:
-                        # --- MELHORIA: FILTRAR ZEROS PARA NÃO SUJAR O GRÁFICO ---
                         df_validos = df_prod[df_prod['preco_pago'] > 0.01]
                         if df_validos.empty: df_validos = df_prod 
 
@@ -2335,7 +2146,6 @@ if df is not None:
                     df_show = filtrar_dados_inteligente(df, 'nome do produto', busca_central)
                     for idx, row in df_show.iterrows():
                         with st.container(border=True):
-                            # --- CORREÇÃO DO ERRO AQUI: Mudado de 'código_barras' para 'código de barras' ---
                             st.write(f"📝 {row['código de barras']} | **{row['nome do produto']}**")
                             col1, col2 = st.columns(2)
                             nova_qtd = col1.number_input(f"Qtd Casa:", value=int(row['qtd_central']), key=f"q_{idx}")
@@ -2568,7 +2378,6 @@ if df is not None:
             st.error("⚠️ CUIDADO: Isso vai apagar tudo que está no histórico hoje e colocar o conteúdo do arquivo no lugar. Use se o histórico atual estiver 'sujo' ou corrompido.")
 
         if arquivos_backup and st.button("🚀 EXECUTAR RECUPERAÇÃO"):
-            # Se for substituir, começamos com lista vazia. Se for unificar, começamos com o atual.
             if modo_recup.startswith("☢️"):
                 lista_dfs = []
             else:
@@ -2577,7 +2386,6 @@ if df is not None:
             for arq in arquivos_backup:
                 try:
                     if arq.name.endswith('.csv'):
-                        # Tenta ler CSV, se falhar tenta com separador ;
                         try:
                             df_temp = pd.read_csv(arq)
                         except:
@@ -2586,11 +2394,8 @@ if df is not None:
                     else:
                         df_temp = pd.read_excel(arq)
                     
-                    # Padroniza colunas
                     df_temp.columns = df_temp.columns.str.strip().str.lower()
                     
-                    # --- FILTRO DE SEGURANÇA PARA O ARQUIVO DE BACKUP ---
-                    # Remove colunas lixo do arquivo CSV (display_combo, etc)
                     cols_ok = [c for c in df_temp.columns if c not in ['display_combo', 'produto_str', 'Selecionar', 'status_temp']]
                     df_temp = df_temp[cols_ok]
                     
@@ -2627,5 +2432,5 @@ if df is not None:
                         st.rerun()
                     else:
                         st.warning("O arquivo resultante está vazio.")
-                else:
-                    st.error("As planilhas não têm as colunas padrão (data, produto, qtd). Verifique os arquivos.")
+            else:
+                st.error("As planilhas não têm as colunas padrão (data, produto, qtd). Verifique os arquivos.")
