@@ -1103,7 +1103,7 @@ if df is not None:
                                             itens_corrigidos += 1
                                 salvar_estoque(df, prefixo)
                                 salvar_logs_em_lote(prefixo, logs_concilia) 
-                                st.success(f"✅ {itens_corrigidos} itens corrigidos!")
+                                st.success(f"✅ {itens_corrigidos} items corrigidos!")
                                 st.rerun()
                         with c_dir:
                             df_export = df_divergente[~df_editor_concilia['✅ Aceitar Qtd Shoppbud (Corrigir App)']].copy()
@@ -1431,13 +1431,14 @@ if df is not None:
             if processar_excel_oficial(arq): st.success("Base atualizada!"); st.rerun()
 
     # ==============================================================================
-    # 🔄 MUDANÇA DA REGRA DE OURO: PLANOGRAMA COM LEITURA INTELIGENTE DE CABEÇALHO
+    # 🔄 MUDANÇA DA REGRA DE OURO: PLANOGRAMA COM LEITURA INTELIGENTE DE CABEÇALHO E SOMA
     # ==============================================================================
     elif modo == "🔄 Sincronizar (Planograma)":
         st.title(f"🔄 Sincronizar - {loja_atual}")
         arquivo = st.file_uploader("📂 Planograma", type=['xlsx', 'xls', 'csv'])
         if arquivo:
             try:
+                arquivo.seek(0)
                 # Agora lê a primeira linha como cabeçalho para obter os nomes reais das colunas
                 if arquivo.name.endswith('.csv'):
                     try: 
@@ -1452,11 +1453,13 @@ if df is not None:
                 df_raw = pd.DataFrame()
                 
             if not df_raw.empty:
-                cols = [str(c).strip() for c in df_raw.columns.tolist()]
+                # 1. Limpeza a laser: arranca os espaços fantasmas dos nomes das colunas
+                df_raw.columns = df_raw.columns.astype(str).str.strip()
+                cols = df_raw.columns.tolist()
                 cols_lower = [c.lower() for c in cols]
                 
                 def find_idx(keywords, default=0):
-                    # Nova lógica: procura a primeira palavra-chave ideal em todas as colunas
+                    # Procura a primeira palavra-chave ideal em todas as colunas
                     for k in keywords:
                         for i, c in enumerate(cols_lower):
                             if k in c: return i
@@ -1481,27 +1484,45 @@ if df is not None:
                     df = carregar_dados(prefixo)
                     novos_prods = []
                     logs_plano = [] 
-                    total_linhas = len(df_raw)
+                    
+                    # --- 2. Soma Inteligente: Agrupa produtos duplicados no mesmo Planograma ---
+                    df_raw[col_qtd] = pd.to_numeric(df_raw[col_qtd], errors='coerce').fillna(0)
+                    df_raw = df_raw[df_raw[col_barras].astype(str).str.strip() != ""]
+                    
+                    agg_dict = {
+                        col_nome: 'first',
+                        col_qtd: 'sum'
+                    }
+                    if col_preco != "(Ignorar)":
+                        df_raw[col_preco] = pd.to_numeric(df_raw[col_preco], errors='coerce')
+                        agg_dict[col_preco] = 'first'
+                        
+                    df_agrupado = df_raw.groupby(col_barras).agg(agg_dict).reset_index()
+                    
+                    total_linhas = len(df_agrupado)
                     bar = st.progress(0)
                     
-                    for i, row in df_raw.iterrows():
+                    for i, row in df_agrupado.iterrows():
                         try:
                             cod = str(row[col_barras]).replace('.0', '').strip()
                             nome = normalizar_texto(str(row[col_nome]))
-                            qtd = pd.to_numeric(row[col_qtd], errors='coerce')
-                            if cod and nome and pd.notnull(qtd):
+                            qtd = row[col_qtd]
+                            
+                            if cod and nome:
                                 mask = df['código de barras'] == cod
                                 if mask.any():
                                     idx = df[mask].index[0]
                                     antigo = df.at[idx, 'qtd.estoque']
                                     df.loc[mask, 'qtd.estoque'] = qtd
-                                    if antigo != qtd: logs_plano.append({'data_hora': str(obter_hora_manaus()), 'produto': nome, 'qtd_antes': antigo, 'qtd_nova': qtd, 'acao': "Sincronização", 'motivo': "Planograma"})
+                                    if antigo != qtd: 
+                                        logs_plano.append({'data_hora': str(obter_hora_manaus()), 'produto': nome, 'qtd_antes': antigo, 'qtd_nova': qtd, 'acao': "Sincronização", 'motivo': "Planograma"})
                                     if col_preco != "(Ignorar)":
-                                        val = pd.to_numeric(row[col_preco], errors='coerce')
+                                        val = row[col_preco]
                                         if pd.notnull(val): df.loc[mask, 'preco_venda'] = val
                                 else:
                                     val_p = 0.0
-                                    if col_preco != "(Ignorar)": val_p = pd.to_numeric(row[col_preco], errors='coerce') or 0.0
+                                    if col_preco != "(Ignorar)": 
+                                        val_p = row[col_preco] if pd.notnull(row[col_preco]) else 0.0
                                     novos_prods.append({'código de barras': cod, 'nome do produto': nome, 'qtd.estoque': qtd, 'qtd_central': 0, 'qtd_minima': 5, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': 0.0, 'preco_venda': val_p, 'categoria': 'GERAL', 'ultimo_fornecedor': '', 'preco_sem_desconto': 0.0, 'status': 'Ativo'})
                         except: pass
                         bar.progress((i+1)/total_linhas)
