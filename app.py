@@ -1503,32 +1503,36 @@ if df is not None:
                     novos_prods = []
                     logs_plano = [] 
                     
-                    # --- Limpeza de Código e Soma Inteligente das Prateleiras ---
-                    df_raw[col_barras] = df_raw[col_barras].astype(str).str.replace('.0', '', regex=False).str.strip()
-                    df_raw = df_raw[df_raw[col_barras] != ""]
-                    df_raw = df_raw[df_raw[col_barras] != "nan"]
-                    df_raw = df_raw[df_raw[col_barras] != "None"]
+                    # --- Limpeza de Código à Prova de Falhas ---
+                    df_raw['codigo_limpo'] = df_raw[col_barras].astype(str).str.replace('.0', '', regex=False).str.strip().str.lower()
+                    
+                    # Arranca os "fantasmas" antes de agrupar!
+                    invalidos = ["", "nan", "none", "sem gtin", "0", "0000000000000", "nao informado"]
+                    df_raw = df_raw[~df_raw['codigo_limpo'].isin(invalidos)]
                     
                     df_raw[col_qtd] = df_raw[col_qtd].apply(parse_num_br)
                     
-                    agg_dict = { col_nome: 'first', col_qtd: 'sum' }
+                    # --- Agrupador Inteligente: Agrupa por Código E NOME (Impede misturar produtos com códigos zoados) ---
+                    agg_dict = { col_qtd: 'sum' }
                     if col_preco != "(Ignorar)":
                         df_raw[col_preco] = df_raw[col_preco].apply(parse_num_br)
                         agg_dict[col_preco] = 'first'
                         
-                    df_agrupado = df_raw.groupby(col_barras).agg(agg_dict).reset_index()
+                    df_agrupado = df_raw.groupby(['codigo_limpo', col_nome], dropna=False, as_index=False).agg(agg_dict)
+                    
+                    st.markdown("### 👁️ Pré-visualização do que será atualizado:")
+                    st.dataframe(df_agrupado.head(10), use_container_width=True, hide_index=True)
                     
                     total_linhas = len(df_agrupado)
                     bar = st.progress(0)
                     
                     for i, row in df_agrupado.iterrows():
                         try:
-                            cod = row[col_barras]
-                            cod_limpo = cod.lstrip('0') # Limpador de Zeros!
+                            cod_limpo = row['codigo_limpo'].lstrip('0') # Limpador de Zeros finais!
                             nome = normalizar_texto(str(row[col_nome]))
                             qtd = row[col_qtd]
                             
-                            if cod and nome:
+                            if cod_limpo and nome:
                                 # Compara ignorando os zeros do Shoppbud e do App
                                 mask = df['código de barras'].astype(str).str.strip().str.lstrip('0') == cod_limpo
                                 if mask.any():
@@ -1544,7 +1548,7 @@ if df is not None:
                                     val_p = 0.0
                                     if col_preco != "(Ignorar)": 
                                         val_p = row[col_preco] if pd.notnull(row[col_preco]) else 0.0
-                                    novos_prods.append({'código de barras': cod, 'nome do produto': nome, 'qtd.estoque': qtd, 'qtd_central': 0, 'qtd_minima': 5, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': 0.0, 'preco_venda': val_p, 'categoria': 'GERAL', 'ultimo_fornecedor': '', 'preco_sem_desconto': 0.0, 'status': 'Ativo'})
+                                    novos_prods.append({'código de barras': row['codigo_limpo'].upper(), 'nome do produto': nome, 'qtd.estoque': qtd, 'qtd_central': 0, 'qtd_minima': 5, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': 0.0, 'preco_venda': val_p, 'categoria': 'GERAL', 'ultimo_fornecedor': '', 'preco_sem_desconto': 0.0, 'status': 'Ativo'})
                         except: pass
                         bar.progress((i+1)/total_linhas)
                     
@@ -2454,6 +2458,9 @@ if df is not None:
                     st.balloons()
                     st.rerun()
 
+    # ==============================================================================
+    # 🛠️ NOVA REGRA DE OURO APLICADA: RECONSTRUIR CASA PELA MÁQUINA DO TEMPO (XML)
+    # ==============================================================================
     elif modo == "🛠️ Ajuste & Limpeza":
         st.title("🛠️ Ajuste & Limpeza de Estoque")
         st.info("Ferramentas para corrigir erros e limpar o cadastro.")
@@ -2507,9 +2514,53 @@ if df is not None:
         else:
             st.success("Tudo limpo! Nenhum produto ativo com estoque baixo encontrado.")
 
-    # ==============================================================================
-    # ♻️ NOVA FERRAMENTA: RESTAURAR HISTÓRICO (AGORA COM SUBSTITUIÇÃO)
-    # ==============================================================================
+        st.divider()
+        st.markdown("### 🪄 Máquina do Tempo: Reconstruir Estoque da Casa")
+        st.write("Se o seu estoque da Casa zerou devido a importações antigas do Planograma, use esta ferramenta. O sistema vai ler todo o seu **Histórico de Compras (XML)**, subtrair as **Vendas** e subtrair o que está hoje na **Loja**, injetando o saldo correto na Casa automaticamente!")
+        
+        if st.button("🚀 RECONSTRUIR CASA AGORA (Baseado no Histórico)", type="primary"):
+            with st.spinner("Lendo todos os históricos e calculando o balanço de massa..."):
+                df_c = carregar_historico(prefixo)
+                df_v = carregar_vendas_itens(prefixo)
+                count_rec = 0
+                
+                for idx, row in df.iterrows():
+                    cod = str(row.get('código de barras', '')).strip()
+                    cod_limpo = cod.lstrip('0')
+                    nome = str(row.get('nome do produto', '')).strip()
+                    loja_atual = float(row.get('qtd.estoque', 0))
+
+                    # Soma todas as compras do XML deste produto
+                    qtd_compra = 0
+                    if not df_c.empty:
+                        mask_c = df_c['produto'].astype(str).str.upper() == nome.upper()
+                        qtd_compra = float(df_c[mask_c]['qtd'].sum())
+
+                    # Soma todas as vendas deste produto
+                    qtd_venda = 0
+                    if not df_v.empty:
+                        mask_v_cod = df_v['código_barras'].astype(str).str.lstrip('0') == cod_limpo
+                        mask_v_nome = df_v['produto'].astype(str).str.upper() == nome.upper()
+                        mask_v = mask_v_cod | mask_v_nome if cod_limpo else mask_v_nome
+                        qtd_venda = float(df_v[mask_v]['qtd_vendida'].sum())
+
+                    # Matemática da Auditoria
+                    if qtd_compra > 0:
+                        saldo_teorico = qtd_compra - qtd_venda
+                        nova_casa = saldo_teorico - loja_atual
+                        if nova_casa < 0: 
+                            nova_casa = 0
+
+                        if float(df.at[idx, 'qtd_central']) != float(nova_casa):
+                            df.at[idx, 'qtd_central'] = nova_casa
+                            count_rec += 1
+
+                salvar_estoque(df, prefixo)
+                st.success(f"✅ Sucesso! {count_rec} produtos tiveram o estoque da Casa recalculado e restaurado.")
+                st.balloons()
+                time.sleep(3)
+                st.rerun()
+
     elif modo == "♻️ Restaurar Histórico":
         st.title("♻️ Restaurador Inteligente de Histórico")
         st.info("Use para corrigir históricos corrompidos ou limpar dados duplicados.")
