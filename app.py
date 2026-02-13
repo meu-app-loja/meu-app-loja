@@ -189,8 +189,6 @@ def filtrar_df_busca_robusta(df, query, cols_text=None, cols_barcode=None):
         # em caso de qualquer erro de parsing/busca, não quebra a tela: retorna df original
         return df
 
-
-
 def limpar_codigo_barras(valor):
     """Converte código de barras para string apenas com dígitos."""
     try:
@@ -206,13 +204,11 @@ def pick_col(colunas, *candidatos):
     cols = list(colunas)
     norm_map = {c: normalizar_para_busca(str(c)) for c in cols}
     cand_norm = [normalizar_para_busca(str(x)) for x in candidatos if x is not None and str(x).strip()!=""]
-    # 1) match exato
     for c in cols:
         nc = norm_map[c]
         for cn in cand_norm:
             if cn and nc == cn:
                 return c
-    # 2) contém (token)
     for c in cols:
         nc = norm_map[c]
         for cn in cand_norm:
@@ -220,12 +216,8 @@ def pick_col(colunas, *candidatos):
                 return c
     return None
 
-
-
 def ler_excel_com_header_auto(file_obj, max_rows=25):
-    """Lê Excel tentando detectar automaticamente a linha de cabeçalho.
-    Retorna (df, header_row_detected, cols_detectadas)."""
-    # Streamlit UploadedFile costuma ser BytesIO; precisamos resetar o ponteiro entre leituras
+    """Lê Excel tentando detectar automaticamente a linha de cabeçalho."""
     try:
         file_obj.seek(0)
     except Exception:
@@ -400,17 +392,14 @@ def parse_num_br(x, default=0.0):
         # Remove moeda e espaços
         s = s.replace("R$", "").replace("\u00a0", " ").strip()
         # Se vier no formato 1.234,56 -> 1234.56
-        # Estratégia: se tem ',' e '.' e a última vírgula está depois do último ponto, assume pt-BR.
         if "," in s and "." in s:
             if s.rfind(",") > s.rfind("."):
                 s = s.replace(".", "").replace(",", ".")
             else:
                 s = s.replace(",", "")
         else:
-            # se só tem ',' assume decimal
             if "," in s and "." not in s:
                 s = s.replace(".", "").replace(",", ".")
-        # Remove qualquer coisa não numérica (exceto - e .)
         s = re.sub(r"[^0-9\-\.]", "", s)
         return float(s) if s not in ["", "-", ".", "-."] else float(default)
     except Exception:
@@ -421,9 +410,6 @@ def formatar_moeda_br(valor):
     except: return f"{valor:.2f}"
 
 def filtrar_dados_inteligente(df, coluna_busca, texto_busca):
-    """Mantido por compatibilidade: agora usa busca robusta.
-    Procura por nome e (se existir) por código de barras com 4+ dígitos.
-    """
     try:
         if df is None or len(df) == 0:
             return df
@@ -433,7 +419,6 @@ def filtrar_dados_inteligente(df, coluna_busca, texto_busca):
         ]
         cols_barcode = [c for c in cols_barcode_candidatas if c in df.columns]
         cols_text = [coluna_busca] if coluna_busca in df.columns else []
-        # também tenta incluir 'produto' ou 'nome do produto' se existirem
         for extra in ['produto', 'nome do produto', 'nome_produto', 'descricao', 'descrição']:
             if extra in df.columns and extra not in cols_text:
                 cols_text.append(extra)
@@ -445,46 +430,30 @@ def filtrar_dados_inteligente(df, coluna_busca, texto_busca):
 # 🛡️ BLINDAGEM: conversão numérica pt-BR + clamp de negativos (regra de ouro)
 # ==============================================================================
 def _to_float(valor):
-    """Converte valores variados (pt-BR, strings, NaN) para float."""
     try:
-        if valor is None or (isinstance(valor, float) and pd.isna(valor)):
-            return 0.0
+        if valor is None or (isinstance(valor, float) and pd.isna(valor)): return 0.0
         s = str(valor).strip()
-        if s == "" or s.lower() in {"nan", "none"}:
-            return 0.0
-        # remove R$ e espaços
+        if s == "" or s.lower() in {"nan", "none"}: return 0.0
         s = s.replace("R$", "").strip()
-        # padrão pt-BR: 1.234,56  -> 1234.56
-        # se tiver ',' e '.', assume '.' milhar e ',' decimal
         if "," in s and "." in s:
             s = s.replace(".", "").replace(",", ".")
         else:
-            # se só tiver ',', assume decimal
             s = s.replace(",", ".")
         return float(s)
-    except Exception:
-        return 0.0
+    except Exception: return 0.0
 
 def _to_int(valor):
-    try:
-        return int(round(_to_float(valor)))
-    except Exception:
-        return 0
+    try: return int(round(_to_float(valor)))
+    except Exception: return 0
 
 def garantir_colunas(df: pd.DataFrame, colunas_obrigatorias: list[str]) -> pd.DataFrame:
-    """Garante que o DF tenha todas as colunas, sem quebrar o que já funciona."""
-    if df is None or df.empty:
-        return pd.DataFrame(columns=colunas_obrigatorias)
+    if df is None or df.empty: return pd.DataFrame(columns=colunas_obrigatorias)
     for c in colunas_obrigatorias:
-        if c not in df.columns:
-            df[c] = ""
+        if c not in df.columns: df[c] = ""
     return df
 
 def blindar_estoque_df(df_estoque: pd.DataFrame) -> pd.DataFrame:
-    """Normaliza colunas essenciais e impede persistir negativos."""
-    if df_estoque is None:
-        return pd.DataFrame()
-    # padroniza nomes (o app trabalha em lower)
+    if df_estoque is None: return pd.DataFrame()
     df = df_estoque.copy()
     df.columns = df.columns.astype(str).str.strip().str.lower()
 
@@ -495,41 +464,30 @@ def blindar_estoque_df(df_estoque: pd.DataFrame) -> pd.DataFrame:
     ]
     df = garantir_colunas(df, colunas_estoque_padrao)
 
-    # conversões numéricas + clamp
     cols_int = ['qtd.estoque', 'qtd_central', 'qtd_minima', 'qtd_comprada']
     cols_money = ['preco_custo', 'preco_venda', 'preco_sem_desconto']
 
     for c in cols_int:
         df[c] = df[c].apply(_to_int)
-        df.loc[df[c] < 0, c] = 0  # nunca negativo
+        df.loc[df[c] < 0, c] = 0
 
     for c in cols_money:
         df[c] = df[c].apply(_to_float)
-        df.loc[df[c] < 0, c] = 0.0  # custo/preço negativo não faz sentido
+        df.loc[df[c] < 0, c] = 0.0
 
-    # textos
     df['código de barras'] = df['código de barras'].apply(lambda x: str(x).replace('.0', '').strip() if pd.notnull(x) else "")
     df['nome do produto'] = df['nome do produto'].apply(lambda x: normalizar_texto(str(x)))
     df['ultimo_fornecedor'] = df['ultimo_fornecedor'].fillna('').astype(str)
-
-    # validade
     df['validade'] = pd.to_datetime(df['validade'], dayfirst=True, errors='coerce')
-
-    # status
     df['status'] = df['status'].replace('', 'Ativo').fillna('Ativo')
     df['status'] = df['status'].apply(lambda x: 'Ativo' if str(x).strip().lower() in {'ativo', 'a'} else ('Inativo' if str(x).strip().lower() in {'inativo', 'i'} else str(x).strip().title()))
     return df
 
 def blindar_valor_estoque(df_estoque: pd.DataFrame) -> float:
-    """Cálculo financeiro seguro (sem NaN/negativos)."""
-    if df_estoque is None or df_estoque.empty:
-        return 0.0
+    if df_estoque is None or df_estoque.empty: return 0.0
     df = df_estoque.copy()
-    # garante colunas
     for c in ['qtd.estoque', 'qtd_central', 'preco_custo', 'status']:
-        if c not in df.columns: 
-            df[c] = 0
-    # clamp
+        if c not in df.columns: df[c] = 0
     q_loja = pd.to_numeric(df['qtd.estoque'], errors='coerce').fillna(0).clip(lower=0)
     q_casa = pd.to_numeric(df['qtd_central'], errors='coerce').fillna(0).clip(lower=0)
     custo = pd.to_numeric(df['preco_custo'], errors='coerce').fillna(0).clip(lower=0)
@@ -580,7 +538,6 @@ def salvar_ids_processados(prefixo, novos_ids):
 
 # --- 🏡 ATUALIZAÇÃO DE CASA GLOBAL (AGORA EM LOTE) ---
 def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, nova_validade, prefixo_ignorar):
-    """Atualiza 1 produto in todas as lojas (Modo Antigo)."""
     todas_lojas = ["loja1", "loja2", "loja3"]
     for loja in todas_lojas:
         if loja == prefixo_ignorar: continue
@@ -603,39 +560,30 @@ def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, n
 
 def atualizar_casa_global_em_lote(lista_atualizacoes, prefixo_origem):
     if not lista_atualizacoes: return
-    
     todas_lojas = ["loja1", "loja2", "loja3"]
     dict_updates = {item['produto']: item for item in lista_atualizacoes}
-    
     for loja in todas_lojas:
         if loja == prefixo_origem: continue
-        
         aba_outra = f"{loja}_estoque"
         df_outra = carregar_do_google(aba_outra)
-        
         if not df_outra.empty:
             alterou_algo = False
             logs_loja_outra = []
-            
             df_outra.columns = df_outra.columns.str.strip().str.lower()
-            
             for produto, dados in dict_updates.items():
                 mask = df_outra['nome do produto'].astype(str) == str(produto)
                 if mask.any():
                     idx = df_outra[mask].index[0]
                     qtd_antiga = df_outra.at[idx, 'qtd_central']
-                    
                     df_outra.at[idx, 'qtd_central'] = dados['qtd_central']
                     if dados.get('custo') is not None: df_outra.at[idx, 'preco_custo'] = dados['custo']
                     if dados.get('venda') is not None: df_outra.at[idx, 'preco_venda'] = dados['venda']
-                    
                     alterou_algo = True
                     logs_loja_outra.append({
                         'data_hora': str(obter_hora_manaus()), 'produto': produto,
                         'qtd_antes': qtd_antiga, 'qtd_nova': dados['qtd_central'],
                         'acao': "Sincronização em Lote", 'motivo': f"Origem: {prefixo_origem}"
                     })
-            
             if alterou_algo:
                 salvar_no_google(df_outra, aba_outra)
                 salvar_logs_em_lote(loja, logs_loja_outra)
@@ -663,18 +611,14 @@ def inicializar_arquivos(prefixo):
 def carregar_dados(prefixo_arquivo):
     try:
         df_raw = carregar_do_google(f"{prefixo_arquivo}_estoque")
-        if df_raw.empty:
-            return pd.DataFrame()
+        if df_raw.empty: return pd.DataFrame()
         return blindar_estoque_df(df_raw)
-    except Exception:
-        return pd.DataFrame()
+    except Exception: return pd.DataFrame()
 
 def carregar_historico(prefixo_arquivo):
     try:
         df_h = carregar_do_google(f"{prefixo_arquivo}_historico_compras")
         if df_h.empty: return pd.DataFrame()
-        
-        # Filtra colunas indesejadas (display_combo, etc) já na leitura para limpar visual
         cols_ok = [c for c in df_h.columns if c not in ['display_combo', 'produto_str', 'Selecionar', 'status_temp']]
         df_h = df_h[cols_ok]
 
@@ -716,36 +660,28 @@ def carregar_vendas(prefixo_arquivo):
 def carregar_vendas_itens(prefixo_arquivo):
     try:
         df_vi = carregar_do_google(f"{prefixo_arquivo}_vendas_itens")
-        if df_vi.empty: 
-            return pd.DataFrame()
+        if df_vi.empty: return pd.DataFrame()
         df_vi.columns = df_vi.columns.str.strip().str.lower()
-        if 'data_hora' in df_vi.columns:
-            df_vi['data_hora'] = pd.to_datetime(df_vi['data_hora'], errors='coerce')
+        if 'data_hora' in df_vi.columns: df_vi['data_hora'] = pd.to_datetime(df_vi['data_hora'], errors='coerce')
         for c in ['qtd_vendida', 'preco_unit', 'valor_total']:
-            if c in df_vi.columns:
-                df_vi[c] = df_vi[c].apply(parse_num_br)
+            if c in df_vi.columns: df_vi[c] = df_vi[c].apply(parse_num_br)
         if 'código_barras' in df_vi.columns:
             df_vi['código_barras'] = df_vi['código_barras'].astype(str).str.replace('.0','',regex=False).str.strip()
         if 'produto' in df_vi.columns:
             df_vi['produto'] = df_vi['produto'].astype(str).apply(normalizar_texto)
         return df_vi
-    except:
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
 def carregar_vendas_transacoes(prefixo_arquivo):
     try:
         df_vt = carregar_do_google(f"{prefixo_arquivo}_vendas_transacoes")
-        if df_vt.empty:
-            return pd.DataFrame()
+        if df_vt.empty: return pd.DataFrame()
         df_vt.columns = df_vt.columns.str.strip().str.lower()
-        if 'data_hora' in df_vt.columns:
-            df_vt['data_hora'] = pd.to_datetime(df_vt['data_hora'], errors='coerce')
+        if 'data_hora' in df_vt.columns: df_vt['data_hora'] = pd.to_datetime(df_vt['data_hora'], errors='coerce')
         for c in ['subtotal', 'descontos', 'taxas', 'total']:
-            if c in df_vt.columns:
-                df_vt[c] = df_vt[c].apply(parse_num_br)
+            if c in df_vt.columns: df_vt[c] = df_vt[c].apply(parse_num_br)
         return df_vt
-    except:
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
 def carregar_lista_compras(prefixo_arquivo):
     try:
@@ -860,7 +796,6 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
 def salvar_estoque(df, prefixo):
     df_blindado = blindar_estoque_df(df)
     salvar_no_google(df_blindado, f"{prefixo}_estoque")
-    # mantém sessão sincronizada
     st.session_state['df_ativo'] = df_blindado
 def salvar_historico(df, prefixo): salvar_no_google(df, f"{prefixo}_historico_compras")
 def salvar_movimentacoes(df, prefixo): salvar_no_google(df, f"{prefixo}_movimentacoes")
@@ -870,7 +805,6 @@ def salvar_vendas_itens(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas_it
 def salvar_vendas_transacoes(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas_transacoes", permitir_vazio=True)
 def salvar_vendas_mensal_produto(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas_mensal_produto", permitir_vazio=True)
 def salvar_mix_review(df_mix, prefixo_arquivo): salvar_no_google(df_mix, f"{prefixo_arquivo}_mix_review", permitir_vazio=True)
-
 
 # ==============================================================================
 # 🚀 INÍCIO DO APP
@@ -1453,7 +1387,7 @@ if df is not None:
             if processar_excel_oficial(arq): st.success("Base atualizada!"); st.rerun()
 
     # ==============================================================================
-    # 🔄 PLANOGRAMA: LIMPEZA DE ZEROS E AGRUPAMENTO DE LINHAS DUPLICADAS
+    # 🔄 PLANOGRAMA: LIMPEZA DE ZEROS E AGRUPAMENTO SÓ POR CÓDIGO (À PROVA DE BALA)
     # ==============================================================================
     elif modo == "🔄 Sincronizar (Planograma)":
         st.title(f"🔄 Sincronizar - {loja_atual}")
@@ -1503,7 +1437,7 @@ if df is not None:
                     novos_prods = []
                     logs_plano = [] 
                     
-                    # --- Limpeza de Código à Prova de Falhas ---
+                    # --- Limpeza a Laser do Código de Barras ANTES de agrupar ---
                     df_raw['codigo_limpo'] = df_raw[col_barras].astype(str).str.replace('.0', '', regex=False).str.strip().str.lower()
                     
                     # Arranca os "fantasmas" antes de agrupar!
@@ -1512,13 +1446,16 @@ if df is not None:
                     
                     df_raw[col_qtd] = df_raw[col_qtd].apply(parse_num_br)
                     
-                    # --- Agrupador Inteligente: Agrupa por Código E NOME (Impede misturar produtos com códigos zoados) ---
-                    agg_dict = { col_qtd: 'sum' }
+                    # --- Agrupador Máximo: Agrupa SOMENTE pelo Código de Barras (Previne erros por variação de nome) ---
+                    agg_dict = { 
+                        col_nome: 'first', # Guarda o primeiro nome para referência visual
+                        col_qtd: 'sum' 
+                    }
                     if col_preco != "(Ignorar)":
                         df_raw[col_preco] = df_raw[col_preco].apply(parse_num_br)
                         agg_dict[col_preco] = 'first'
                         
-                    df_agrupado = df_raw.groupby(['codigo_limpo', col_nome], dropna=False, as_index=False).agg(agg_dict)
+                    df_agrupado = df_raw.groupby('codigo_limpo', dropna=False, as_index=False).agg(agg_dict)
                     
                     st.markdown("### 👁️ Pré-visualização do que será atualizado:")
                     st.dataframe(df_agrupado.head(10), use_container_width=True, hide_index=True)
