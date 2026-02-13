@@ -1455,16 +1455,20 @@ if df is not None:
                 cols = [str(c).strip() for c in df_raw.columns.tolist()]
                 cols_lower = [c.lower() for c in cols]
                 
-                # Caçador automático de colunas para facilitar a vida
                 def find_idx(keywords, default=0):
-                    for i, c in enumerate(cols_lower):
-                        if any(k in c for k in keywords): return i
+                    # Nova lógica: procura a primeira palavra-chave ideal em todas as colunas
+                    for k in keywords:
+                        for i, c in enumerate(cols_lower):
+                            if k in c: return i
                     return default
                 
-                idx_barras = find_idx(['código', 'codigo', 'barras'], 0)
-                idx_nome = find_idx(['nome', 'produto', 'descrição'], 1 if len(cols)>1 else 0)
-                idx_qtd = find_idx(['qtd', 'quantidade', 'estoque'], len(cols)-1)
-                idx_preco = find_idx(['preço', 'preco', 'valor', 'venda', 'consumidor'], -1)
+                # Caçadores super treinados! Nunca mais caem no Código de Planograma ou Qtd Padrão
+                idx_barras = find_idx(['barras', 'ean', 'gtin', 'código', 'codigo'], 0)
+                idx_nome = find_idx(['produto', 'nome', 'descrição'], 1 if len(cols)>1 else 0)
+                idx_qtd = find_idx(['estoque', 'físico', 'quantidade real', 'qtd'], len(cols)-1)
+                idx_preco = find_idx(['consumidor', 'venda', 'preço final', 'preco'], -1)
+
+                st.info("🎯 **Mapeamento Automático:** Confirme abaixo se o sistema achou as colunas certas!")
 
                 c1, c2, c3, c4 = st.columns(4)
                 col_barras = c1.selectbox("CÓDIGO BARRAS", cols, index=idx_barras)
@@ -1473,7 +1477,7 @@ if df is not None:
                 opcoes_preco = ["(Ignorar)"] + cols
                 col_preco = c4.selectbox("PREÇO VENDA", opcoes_preco, index=(idx_preco + 1) if idx_preco != -1 else 0)
                 
-                if st.button("🚀 SINCRONIZAR TUDO"):
+                if st.button("🚀 SINCRONIZAR TUDO", type="primary"):
                     df = carregar_dados(prefixo)
                     novos_prods = []
                     logs_plano = [] 
@@ -1505,7 +1509,7 @@ if df is not None:
                     if novos_prods: df = pd.concat([df, pd.DataFrame(novos_prods)], ignore_index=True)
                     salvar_estoque(df, prefixo)
                     salvar_logs_em_lote(prefixo, logs_plano) 
-                    st.success("Sincronizado!")
+                    st.success("Sincronizado perfeitamente!")
                     st.rerun()
 
     elif modo == "📈 Vendas (Importar & 80/20)":
