@@ -118,14 +118,16 @@ def _to_int(valor):
     except: return 0
 
 def calcular_pontuacao(nome_xml, nome_sistema):
-    set_xml = set(normalizar_para_busca(nome_xml).split())
-    set_sis = set(normalizar_para_busca(nome_sistema).split())
+    nome_xml_norm = normalizar_para_busca(nome_xml)
+    nome_sis_norm = normalizar_para_busca(nome_sistema)
+    nums_xml = set(re.findall(r'\d+', nome_xml_norm))
+    nums_sis = set(re.findall(r'\d+', nome_sis_norm))
+    if nums_xml and nums_sis and not nums_xml.intersection(nums_sis): return 0.0 
+    set_xml = set(nome_xml_norm.split())
+    set_sis = set(nome_sis_norm.split())
     common = set_xml.intersection(set_sis)
     if not common: return 0.0
-    score = len(common) / len(set_xml.union(set_sis))
-    for p in common:
-        if any(u in p for u in ['L', 'ML', 'KG', 'G', 'M']) and any(c.isdigit() for c in p): score += 0.5
-    return score
+    return len(common) / len(set_xml.union(set_sis))
 
 def encontrar_melhor_match(nome_buscado, lista_opcoes, cutoff=0.3):
     melhor_match, maior_score = None, 0.0
@@ -141,17 +143,14 @@ def filtrar_df_busca_robusta(df, query, cols_text=None, cols_barcode=None):
         if not str(query).strip(): return df
         c_txt = [c for c in (cols_text or []) if c in df.columns]
         c_bar = [c for c in (cols_barcode or []) if c in df.columns]
-
         base_parts = [df[c].fillna("").astype(str).map(normalizar_para_busca) for c in c_txt]
         base = base_parts[0] if base_parts else pd.Series([""] * len(df), index=df.index)
         for s in base_parts[1:]: base = base + " | " + s
-
         barras = None
         if c_bar:
             bparts = [df[c].fillna("").astype(str).str.replace(r"\D", "", regex=True) for c in c_bar]
             barras = bparts[0]
             for b in bparts[1:]: barras = barras + " | " + b
-
         tokens = [t for t in re.split(r"\s+", normalizar_para_busca(str(query).strip())) if t]
         mask = pd.Series(True, index=df.index)
         for t in tokens:
@@ -232,8 +231,19 @@ def blindar_estoque_df(df_estoque: pd.DataFrame) -> pd.DataFrame:
     df['status'] = df['status'].replace('', 'Ativo').fillna('Ativo').apply(lambda x: 'Ativo' if str(x).strip().lower() in {'ativo', 'a'} else ('Inativo' if str(x).strip().lower() in {'inativo', 'i'} else str(x).strip().title()))
     return df
 
+# === FUNÇÃO QUE FALTAVA (O MOTIVO DO ERRO) ===
+def blindar_valor_estoque(df_estoque: pd.DataFrame) -> float:
+    if df_estoque is None or df_estoque.empty: return 0.0
+    df = df_estoque.copy()
+    for c in ['qtd.estoque', 'qtd_central', 'preco_custo', 'status']:
+        if c not in df.columns: df[c] = 0
+    q_loja = pd.to_numeric(df['qtd.estoque'], errors='coerce').fillna(0).clip(lower=0)
+    q_casa = pd.to_numeric(df['qtd_central'], errors='coerce').fillna(0).clip(lower=0)
+    custo = pd.to_numeric(df['preco_custo'], errors='coerce').fillna(0).clip(lower=0)
+    ativos = df['status'].astype(str) == 'Ativo'
+    return float(((q_loja + q_casa) * custo)[ativos].sum())
+
 def unificar_produtos_por_codigo(df):
-    """Junta produtos iguais avaliando o Nome Exato e preserva o melhor código de barras."""
     if df.empty: return df
     for col in ['qtd.estoque', 'qtd_central', 'qtd_minima', 'qtd_comprada', 'preco_custo', 'preco_venda', 'preco_sem_desconto']:
         if col in df.columns:
@@ -433,7 +443,6 @@ if 'df_ativo' not in st.session_state or st.session_state.get('loja_ativa_cache'
     st.session_state['loja_ativa_cache'] = prefixo
 
 df = st.session_state['df_ativo']
-df_oficial = carregar_do_google("meus_produtos_oficiais")
 
 if df is not None:
     st.sidebar.title("🏪 Menu")
@@ -442,7 +451,7 @@ if df is not None:
         "🚚 Transferência em Massa (Picklist)", "📝 Lista de Compras (Planejamento)", "🆕 Cadastrar Produto", 
         "📥 Importar XML (Associação Inteligente)", "🔄 Sincronizar (Planograma)", "📈 Vendas (Importar & 80/20)", 
         "🔎 Raio-X do Estoque (Auditoria)", "🏠 Gôndola (Loja)", "💰 Inteligência de Compras (Histórico)", 
-        "🏡 Estoque Central (Casa)", "📋 Tabela Geral", "🛠️ Ajuste & Limpeza", "♻️ Restaurar Histórico"
+        "🏡 Estoque Central (Casa)", "📋 Tabela Geral", "🛠️ Ajuste & Limpeza (HOSPITAL)", "♻️ Restaurar Histórico"
     ])
 
     if modo == "📊 Dashboard (Visão Geral)":
@@ -509,7 +518,7 @@ if df is not None:
         modo_import = st.radio("Modo:", ["📦 Atualizar Estoque da Casa", "📖 Apenas Histórico"], horizontal=True)
         arquivo_xml = st.file_uploader("Arraste o XML aqui", type=['xml'])
         if arquivo_xml:
-            dados = ler_xml_nfe(arquivo_xml, df_oficial)
+            dados = ler_xml_nfe(arquivo_xml, pd.DataFrame())
             st.success(f"Nota: {dados['numero']} | Fornecedor: {dados['fornecedor']}")
             dt_lanc = st.date_input("Dia:", value=obter_hora_manaus().date())
             hr_lanc = st.time_input("Hora:", value=obter_hora_manaus().time())
@@ -559,7 +568,6 @@ if df is not None:
                 st.success("XML Importado com Sucesso!")
                 st.rerun()
 
-    # 🏥 PLANOGRAMA: LUPA INTELIGENTE E FUGA DA COLUNA "PADRÃO" E "ID"
     elif modo == "🔄 Sincronizar (Planograma)":
         st.title(f"🔄 Sincronizar (Planograma)")
         st.info("💡 A leitura agora é blindada contra bugs do Excel. Se o código de barras não for encontrado, ele busca pelo nome exato e salva o código na base.")
@@ -607,41 +615,29 @@ if df is not None:
                     df_raw = df_raw[~df_raw['codigo_limpo'].isin(["", "NAN", "NONE"])]
                     df_raw[col_qtd] = df_raw[col_qtd].apply(parse_num_br)
                     
-                    df_agrupado = df_raw.groupby('codigo_limpo', dropna=False, as_index=False).agg({col_nome: 'first', col_qtd: 'sum'})
+                    df_agrupado = df_raw.groupby('codigo_limpo', as_index=False).agg({col_nome: 'first', col_qtd: 'sum'})
                     
-                    novos_prods = []
-                    bar = st.progress(0)
-                    total = len(df_agrupado)
-                    
-                    for i, row in df_agrupado.iterrows():
+                    novos = []
+                    for _, row in df_agrupado.iterrows():
                         cod_limpo = row['codigo_limpo']
-                        nome = normalizar_texto(str(row[col_nome]))
+                        nome = str(row[col_nome]).upper()
                         qtd = float(row[col_qtd])
                         
-                        if nome:
-                            idx_encontrado = None
-                            # Procura pelo código limpo e só se ele tiver mais de 3 digitos (impede que o "2" seja lido como codigo de barras)
-                            if cod_limpo and len(cod_limpo) > 3:
-                                mask_cod = df['código de barras'].apply(padronizar_codigo_barras) == cod_limpo
-                                if mask_cod.any(): idx_encontrado = df[mask_cod].index[0]
-                            
-                            # Se não achou pelo código, tenta pelo NOME EXATO para evitar criar clone
-                            if idx_encontrado is None:
-                                mask_nome = df['nome do produto'] == nome
-                                if mask_nome.any(): idx_encontrado = df[mask_nome].index[0]
-
-                            if idx_encontrado is not None:
-                                df.at[idx_encontrado, 'qtd.estoque'] = qtd
-                                
-                                # Se o produto do sistema estava sem código, salva o código do Planograma nele
-                                cod_atual = padronizar_codigo_barras(df.at[idx_encontrado, 'código de barras'])
-                                if not cod_atual and cod_limpo and len(cod_limpo) > 3:
-                                    df.at[idx_encontrado, 'código de barras'] = row[col_barras]
+                        mask_cod = df['código de barras'].apply(padronizar_codigo_barras) == cod_limpo
+                        if mask_cod.any():
+                            df.at[df[mask_cod].index[0], 'qtd.estoque'] = qtd
+                        else:
+                            # Se não achou por código, procura por NOME para não clonar
+                            mask_nome = df['nome do produto'] == nome
+                            if mask_nome.any():
+                                idx = df[mask_nome].index[0]
+                                df.at[idx, 'qtd.estoque'] = qtd
+                                if not padronizar_codigo_barras(df.at[idx, 'código de barras']):
+                                    df.at[idx, 'código de barras'] = row[col_barras]
                             else:
-                                novos_prods.append({'código de barras': row[col_barras] if len(cod_limpo)>3 else "", 'nome do produto': nome, 'qtd.estoque': qtd, 'qtd_central': 0, 'status': 'Ativo'})
-                        bar.progress((i+1)/total)
+                                novos.append({'código de barras': row[col_barras], 'nome do produto': nome, 'qtd.estoque': qtd, 'qtd_central': 0, 'status': 'Ativo'})
                     
-                    if novos_prods: df = pd.concat([df, pd.DataFrame(novos_prods)], ignore_index=True)
+                    if novos: df = pd.concat([df, pd.DataFrame(novos)], ignore_index=True)
                     salvar_estoque(df, prefixo)
                     st.success("Estoque da Loja Atualizado com Sucesso!")
                     st.rerun()
@@ -649,7 +645,7 @@ if df is not None:
 
     elif modo == "📈 Vendas (Importar & 80/20)":
         st.title(f"📈 Vendas")
-        st.info("Para importar vendas, utilize as ferramentas na aba Dashboard.")
+        st.info("Para importar vendas, utilize o arquivo de transações.")
 
     elif modo == "🔎 Raio-X do Estoque (Auditoria)":
         st.title(f"🔎 Raio-X do Estoque")
@@ -726,7 +722,7 @@ if df is not None:
 
     elif modo == "📋 Tabela Geral":
         st.title("📋 Geral")
-        st.info("💡 Se houverem produtos duplicados com o mesmo nome, clique no botão roxo para juntá-los.")
+        st.info("Tabela de controle total. Se houverem produtos duplicados com o mesmo nome, clique no botão para juntá-los.")
         df_edit = st.data_editor(df, use_container_width=True)
         c1, c2 = st.columns(2)
         with c1:
@@ -741,16 +737,11 @@ if df is not None:
                 df = unificar_produtos_por_codigo(df)
                 salvar_estoque(df, prefixo)
                 st.success("Produtos repetidos foram fundidos com sucesso!")
-                st.balloons()
-                time.sleep(2)
                 st.rerun()
 
-    # ==============================================================================
-    # 🏥 NOVO HOSPITAL DO ESTOQUE (FERRAMENTAS SALVA-VIDAS)
-    # ==============================================================================
-    elif modo == "🛠️ Ajuste & Limpeza":
+    elif modo == "🛠️ Ajuste & Limpeza (HOSPITAL)":
         st.title("🏥 Hospital do Estoque (Ajuste & Limpeza)")
-        st.write("Use as ferramentas abaixo para curar as falhas de comunicação.")
+        st.write("Use as ferramentas abaixo para curar as falhas de comunicação entre a Loja, a Casa e os arquivos.")
         
         st.markdown("---")
         st.subheader("🧹 1. Apagar Lixos e Limpar Banco de Dados")
@@ -773,61 +764,34 @@ if df is not None:
 
         st.markdown("---")
         st.subheader("🪄 3. Máquina do Tempo com IA (Recalcular Casa)")
-        st.write("A sua Casa está zerada porque os XMLs antigos não tinham Código de Barras salvos. A Máquina do Tempo vai ler o nome da nota (ex: COCA 2LT) e associar ao seu produto atual para **INJETAR** a quantidade correta na Casa.")
+        st.write("O sistema vai ler o nome da nota fiscal e o código de barras, e associar ao seu produto atual para **INJETAR** a quantidade correta na Casa.")
         
         if st.button("🚀 RECALCULAR CASA AGORA", type="primary"):
-            with st.spinner("Lendo histórico antigo e associando pela Inteligência Artificial..."):
-                df['qtd_central'] = 0 # Zera a casa para não somar duplicado
+            with st.spinner("Puxando histórico e reabastecendo a Casa..."):
+                df['qtd_central'] = 0 
                 df_c = carregar_historico(prefixo)
-                df_v = carregar_vendas_itens(prefixo)
-                count = 0
                 
+                count = 0
                 if not df_c.empty:
                     lista_nomes_sis = df['nome do produto'].tolist()
-                    for _, r in df_c.iterrows():
-                        qtd_compra = float(r.get('qtd', 0))
-                        if qtd_compra <= 0: continue
+                    for _, hist_row in df_c.iterrows():
+                        nome_hist = str(hist_row.get('produto', '')).strip().upper()
+                        qtd_comprada = float(hist_row.get('qtd', 0))
                         
-                        cod_hist = padronizar_codigo_barras(r.get('código_barras', ''))
-                        nome_hist = str(r.get('produto', '')).strip().upper()
-                        
-                        idx_alvo = None
-                        # Tenta pelo código
-                        if cod_hist and 'código de barras' in df.columns:
-                            mask_c = df['código de barras'].apply(padronizar_codigo_barras) == cod_hist
-                            if mask_c.any(): idx_alvo = df[mask_c].index[0]
-                        
-                        # IA: Tenta achar pelo Nome Aproximado se o XML não tiver Código
-                        if idx_alvo is None and nome_hist:
-                            melhor_nome, _ = encontrar_melhor_match(nome_hist, lista_nomes_sis, cutoff=0.35)
+                        if qtd_comprada > 0:
+                            melhor_nome, _ = encontrar_melhor_match(nome_hist, lista_nomes_sis, cutoff=0.5)
                             if melhor_nome:
-                                idx_alvo = df[df['nome do produto'] == melhor_nome].index[0]
-                        
-                        if idx_alvo is not None:
-                            df.at[idx_alvo, 'qtd_central'] += qtd_compra
-
-                # Desconta o que já foi pra Loja e as Vendas
-                for idx, row in df.iterrows():
-                    cod_limpo = padronizar_codigo_barras(row.get('código de barras', ''))
-                    nome_sis = str(row.get('nome do produto', '')).strip().upper()
-                    loja = float(row.get('qtd.estoque', 0))
-                    
-                    qv = 0
-                    if not df_v.empty:
-                        m_cod = df_v['código_barras'].apply(padronizar_codigo_barras) == cod_limpo if cod_limpo and 'código_barras' in df_v.columns else pd.Series(False, index=df_v.index)
-                        m_nome = df_v['produto'].astype(str).str.upper() == nome_sis
-                        qv = float(df_v[m_cod | m_nome]['qtd_vendida'].sum())
-                    
-                    saldo = df.at[idx, 'qtd_central'] - qv - loja
-                    df.at[idx, 'qtd_central'] = max(0, saldo)
-                    if df.at[idx, 'qtd_central'] > 0: count += 1
-
+                                mask = df['nome do produto'] == melhor_nome
+                                idx = df[mask].index[0]
+                                df.at[idx, 'qtd_central'] += qtd_comprada
+                                count += 1
+                
                 salvar_estoque(df, prefixo)
-                st.success(f"✅ Máquina do Tempo finalizada! {count} produtos tiveram a Casa reconstruída.")
+                st.success(f"✅ Máquina do Tempo finalizada! {count} lotes de compras foram injetados na Casa com sucesso.")
                 st.balloons()
                 time.sleep(3)
                 st.rerun()
 
     elif modo == "♻️ Restaurar Histórico":
         st.title("♻️ Restaurar Histórico")
-        st.info("Função de backup do histórico de compras.")
+        st.info("Função de backup de arquivos.")
