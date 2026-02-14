@@ -88,7 +88,7 @@ def salvar_no_google(df, nome_aba, permitir_vazio=False):
         
         # --- FILTRO DE SEGURANÇA (LIMPEZA AUTOMÁTICA) ---
         # Antes de salvar, removemos colunas que o sistema cria apenas para visualização
-        colunas_proibidas = ['display_combo', 'produto_str', 'Selecionar', 'status_temp', 'nome_padrao']
+        colunas_proibidas = ['display_combo', 'produto_str', 'Selecionar', 'status_temp', 'nome_padrao', 'codigo_limpo']
         # Mantém apenas colunas que NÃO estão na lista de proibidas
         cols_para_salvar = [c for c in df.columns if c not in colunas_proibidas]
         df_limpo = df[cols_para_salvar].copy()
@@ -123,7 +123,7 @@ def normalizar_para_busca(texto):
     if not isinstance(texto, str): return ""
     return normalizar_texto(texto)
 
-# --- CIRURGIA: PADRONIZAR CÓDIGOS DE BARRAS ---
+# --- CIRURGIA: PADRONIZADOR DE CÓDIGO DE BARRAS ---
 def padronizar_codigo_barras(valor):
     if pd.isna(valor) or valor is None: return ""
     s = str(valor).strip().upper()
@@ -210,11 +210,13 @@ def pick_col(colunas, *candidatos):
     cols = list(colunas)
     norm_map = {c: normalizar_para_busca(str(c)) for c in cols}
     cand_norm = [normalizar_para_busca(str(x)) for x in candidatos if x is not None and str(x).strip()!=""]
+    # 1) match exato
     for c in cols:
         nc = norm_map[c]
         for cn in cand_norm:
             if cn and nc == cn:
                 return c
+    # 2) contém (token)
     for c in cols:
         nc = norm_map[c]
         for cn in cand_norm:
@@ -223,13 +225,15 @@ def pick_col(colunas, *candidatos):
     return None
 
 def ler_excel_com_header_auto(file_obj, max_rows=25):
-    """Lê Excel tentando detectar automaticamente a linha de cabeçalho."""
+    """Lê Excel tentando detectar automaticamente a linha de cabeçalho.
+    Retorna (df, header_row_detected, cols_detectadas)."""
+    # Streamlit UploadedFile costuma ser BytesIO; precisamos resetar o ponteiro entre leituras
     try:
         file_obj.seek(0)
     except Exception:
         pass
 
-    # CIRURGIA: Lendo como String para não quebrar códigos
+    # CIRURGIA 1: dtype=str para o Excel não bagunçar
     amostra = pd.read_excel(file_obj, header=None, nrows=max_rows, dtype=str)
     chaves = ["PRODUTO", "ITEM", "DESCRICAO", "QTD", "QUANTIDADE", "TRANSACAO", "ID", "DATA", "LOJA"]
 
@@ -253,7 +257,6 @@ def ler_excel_com_header_auto(file_obj, max_rows=25):
     except Exception:
         pass
 
-    # CIRURGIA: Lendo como String
     df = pd.read_excel(file_obj, header=header_row, dtype=str).dropna(axis=1, how="all")
     cols = list(df.columns)
     return df, header_row, cols
@@ -262,12 +265,12 @@ def calcular_pontuacao(nome_xml, nome_sistema):
     nome_xml_norm = normalizar_para_busca(nome_xml)
     nome_sis_norm = normalizar_para_busca(nome_sistema)
     
-    # CIRURGIA: Impede que produtos com ML/L diferentes se misturem (ex: 2L com 200ML)
+    # CIRURGIA: Proteção anti-mistura (Ex: Impede misturar Coca 2L com 200ML)
     nums_xml = set(re.findall(r'\d+', nome_xml_norm))
     nums_sis = set(re.findall(r'\d+', nome_sis_norm))
     if nums_xml and nums_sis and not nums_xml.intersection(nums_sis):
-        return 0.0 
-        
+        return 0.0 # Bloqueia imediatamente
+
     set_xml = set(nome_xml_norm.split())
     set_sis = set(nome_sis_norm.split())
     common = set_xml.intersection(set_sis)
@@ -303,13 +306,14 @@ def unificar_produtos_por_codigo(df):
 
     lista_final = []
     
-    # CIRURGIA: Unificar clones pelo nome exato e salvar o código!
+    # CIRURGIA: Agrupa pelo NOME para pescar os clones sem código
     df['nome_padrao'] = df['nome do produto'].apply(normalizar_texto)
 
     for nome, grupo in df.groupby('nome_padrao'):
         if len(grupo) > 1:
             melhor_nome = max(grupo['nome do produto'].tolist(), key=len)
             
+            # Pega o melhor código de barras que existir no grupo
             codigos = [str(c).strip() for c in grupo['código de barras'].tolist() if padronizar_codigo_barras(c)]
             melhor_cod = max(codigos, key=len) if codigos else ""
             
@@ -433,34 +437,63 @@ def formatar_moeda_br(valor):
     try: return f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except: return f"{valor:.2f}"
 
+def filtrar_dados_inteligente(df, coluna_busca, texto_busca):
+    """Mantido por compatibilidade: agora usa busca robusta."""
+    try:
+        if df is None or len(df) == 0:
+            return df
+        cols_barcode_candidatas = [
+            'código de barras','codigo de barras','código_barras','codigo_barras',
+            'barcode','ean','ean13','gtin','gtin13','código barras','codigo barras'
+        ]
+        cols_barcode = [c for c in cols_barcode_candidatas if c in df.columns]
+        cols_text = [coluna_busca] if coluna_busca in df.columns else []
+        for extra in ['produto', 'nome do produto', 'nome_produto', 'descricao', 'descrição']:
+            if extra in df.columns and extra not in cols_text:
+                cols_text.append(extra)
+        return filtrar_df_busca_robusta(df, texto_busca, cols_text=cols_text, cols_barcode=cols_barcode)
+    except Exception:
+        return df
+
 # ==============================================================================
 # 🛡️ BLINDAGEM: conversão numérica pt-BR + clamp de negativos (regra de ouro)
 # ==============================================================================
 def _to_float(valor):
+    """Converte valores variados (pt-BR, strings, NaN) para float."""
     try:
-        if valor is None or (isinstance(valor, float) and pd.isna(valor)): return 0.0
+        if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+            return 0.0
         s = str(valor).strip()
-        if s == "" or s.lower() in {"nan", "none"}: return 0.0
+        if s == "" or s.lower() in {"nan", "none"}:
+            return 0.0
         s = s.replace("R$", "").strip()
         if "," in s and "." in s:
             s = s.replace(".", "").replace(",", ".")
         else:
             s = s.replace(",", ".")
         return float(s)
-    except Exception: return 0.0
+    except Exception:
+        return 0.0
 
 def _to_int(valor):
-    try: return int(round(_to_float(valor)))
-    except Exception: return 0
+    try:
+        return int(round(_to_float(valor)))
+    except Exception:
+        return 0
 
 def garantir_colunas(df: pd.DataFrame, colunas_obrigatorias: list[str]) -> pd.DataFrame:
-    if df is None or df.empty: return pd.DataFrame(columns=colunas_obrigatorias)
+    """Garante que o DF tenha todas as colunas, sem quebrar o que já funciona."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=colunas_obrigatorias)
     for c in colunas_obrigatorias:
-        if c not in df.columns: df[c] = ""
+        if c not in df.columns:
+            df[c] = ""
     return df
 
 def blindar_estoque_df(df_estoque: pd.DataFrame) -> pd.DataFrame:
-    if df_estoque is None: return pd.DataFrame()
+    """Normaliza colunas essenciais e impede persistir negativos."""
+    if df_estoque is None:
+        return pd.DataFrame()
     df = df_estoque.copy()
     df.columns = df.columns.astype(str).str.strip().str.lower()
 
@@ -476,11 +509,11 @@ def blindar_estoque_df(df_estoque: pd.DataFrame) -> pd.DataFrame:
 
     for c in cols_int:
         df[c] = df[c].apply(_to_int)
-        df.loc[df[c] < 0, c] = 0
+        df.loc[df[c] < 0, c] = 0 
 
     for c in cols_money:
         df[c] = df[c].apply(_to_float)
-        df.loc[df[c] < 0, c] = 0.0
+        df.loc[df[c] < 0, c] = 0.0 
 
     df['código de barras'] = df['código de barras'].apply(lambda x: str(x).replace('.0', '').strip() if pd.notnull(x) else "")
     df['nome do produto'] = df['nome do produto'].apply(lambda x: normalizar_texto(str(x)))
@@ -491,10 +524,13 @@ def blindar_estoque_df(df_estoque: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def blindar_valor_estoque(df_estoque: pd.DataFrame) -> float:
-    if df_estoque is None or df_estoque.empty: return 0.0
+    """Cálculo financeiro seguro (sem NaN/negativos)."""
+    if df_estoque is None or df_estoque.empty:
+        return 0.0
     df = df_estoque.copy()
     for c in ['qtd.estoque', 'qtd_central', 'preco_custo', 'status']:
-        if c not in df.columns: df[c] = 0
+        if c not in df.columns: 
+            df[c] = 0
     q_loja = pd.to_numeric(df['qtd.estoque'], errors='coerce').fillna(0).clip(lower=0)
     q_casa = pd.to_numeric(df['qtd_central'], errors='coerce').fillna(0).clip(lower=0)
     custo = pd.to_numeric(df['preco_custo'], errors='coerce').fillna(0).clip(lower=0)
@@ -545,6 +581,7 @@ def salvar_ids_processados(prefixo, novos_ids):
 
 # --- 🏡 ATUALIZAÇÃO DE CASA GLOBAL (AGORA EM LOTE) ---
 def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, nova_validade, prefixo_ignorar):
+    """Atualiza 1 produto in todas as lojas (Modo Antigo)."""
     todas_lojas = ["loja1", "loja2", "loja3"]
     for loja in todas_lojas:
         if loja == prefixo_ignorar: continue
@@ -567,30 +604,39 @@ def atualizar_casa_global(nome_produto, qtd_nova_casa, novo_custo, novo_venda, n
 
 def atualizar_casa_global_em_lote(lista_atualizacoes, prefixo_origem):
     if not lista_atualizacoes: return
+    
     todas_lojas = ["loja1", "loja2", "loja3"]
     dict_updates = {item['produto']: item for item in lista_atualizacoes}
+    
     for loja in todas_lojas:
         if loja == prefixo_origem: continue
+        
         aba_outra = f"{loja}_estoque"
         df_outra = carregar_do_google(aba_outra)
+        
         if not df_outra.empty:
             alterou_algo = False
             logs_loja_outra = []
+            
             df_outra.columns = df_outra.columns.str.strip().str.lower()
+            
             for produto, dados in dict_updates.items():
                 mask = df_outra['nome do produto'].astype(str) == str(produto)
                 if mask.any():
                     idx = df_outra[mask].index[0]
                     qtd_antiga = df_outra.at[idx, 'qtd_central']
+                    
                     df_outra.at[idx, 'qtd_central'] = dados['qtd_central']
                     if dados.get('custo') is not None: df_outra.at[idx, 'preco_custo'] = dados['custo']
                     if dados.get('venda') is not None: df_outra.at[idx, 'preco_venda'] = dados['venda']
+                    
                     alterou_algo = True
                     logs_loja_outra.append({
                         'data_hora': str(obter_hora_manaus()), 'produto': produto,
                         'qtd_antes': qtd_antiga, 'qtd_nova': dados['qtd_central'],
                         'acao': "Sincronização em Lote", 'motivo': f"Origem: {prefixo_origem}"
                     })
+            
             if alterou_algo:
                 salvar_no_google(df_outra, aba_outra)
                 salvar_logs_em_lote(loja, logs_loja_outra)
@@ -599,8 +645,8 @@ def atualizar_casa_global_em_lote(lista_atualizacoes, prefixo_origem):
 def inicializar_arquivos(prefixo):
     arquivos = {
         f"{prefixo}_estoque": ['código de barras', 'nome do produto', 'qtd.estoque', 'qtd_central', 'qtd_minima', 'validade', 'status_compra', 'qtd_comprada', 'preco_custo', 'preco_venda', 'categoria', 'ultimo_fornecedor', 'preco_sem_desconto', 'status'],
-        # CIRURGIA: Garante que histórico vai ter a coluna código_barras
-        f"{prefixo}_historico_compras": ['data', 'data_emissao', 'código_barras', 'produto', 'fornecedor', 'qtd', 'preco_pago', 'total_gasto', 'numero_nota', 'desconto_total_money', 'preco_sem_desconto', 'obs_importacao'],
+        # CIRURGIA: Garante que o código_barras é uma coluna nativa no histórico
+        f"{prefixo}_historico_compras": ['data', 'data_emissao', 'produto', 'fornecedor', 'qtd', 'preco_pago', 'total_gasto', 'numero_nota', 'desconto_total_money', 'preco_sem_desconto', 'obs_importacao', 'código_barras'],
         f"{prefixo}_movimentacoes": ['data_hora', 'produto', 'qtd_movida'],
         f"{prefixo}_vendas": ['data_hora', 'produto', 'qtd_vendida', 'estoque_restante'],
 
@@ -619,14 +665,17 @@ def inicializar_arquivos(prefixo):
 def carregar_dados(prefixo_arquivo):
     try:
         df_raw = carregar_do_google(f"{prefixo_arquivo}_estoque")
-        if df_raw.empty: return pd.DataFrame()
+        if df_raw.empty:
+            return pd.DataFrame()
         return blindar_estoque_df(df_raw)
-    except Exception: return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
 
 def carregar_historico(prefixo_arquivo):
     try:
         df_h = carregar_do_google(f"{prefixo_arquivo}_historico_compras")
         if df_h.empty: return pd.DataFrame()
+        
         cols_ok = [c for c in df_h.columns if c not in ['display_combo', 'produto_str', 'Selecionar', 'status_temp']]
         df_h = df_h[cols_ok]
 
@@ -637,10 +686,12 @@ def carregar_historico(prefixo_arquivo):
                  df_h[c] = df_h[c].astype(str).str.replace(',', '.', regex=False)
                  df_h[c] = pd.to_numeric(df_h[c], errors='coerce').fillna(0)
         
-        # Garante que código de barras exista na leitura
-        for col in ['numero_nota', 'obs_importacao', 'data_emissao', 'código_barras']:
-             if col not in df_h.columns: df_h[col] = ""
-             
+        # Garante que as colunas existam se a base for antiga
+        if 'numero_nota' not in df_h.columns: df_h['numero_nota'] = ""
+        if 'obs_importacao' not in df_h.columns: df_h['obs_importacao'] = ""
+        if 'data_emissao' not in df_h.columns: df_h['data_emissao'] = ""
+        if 'código_barras' not in df_h.columns: df_h['código_barras'] = ""
+        
         if 'desconto_total_money' not in df_h.columns:
             if 'desconto_obtido' in df_h.columns: df_h['desconto_total_money'] = df_h['desconto_obtido'] * df_h['qtd']
             else: df_h['desconto_total_money'] = 0.0
@@ -669,28 +720,50 @@ def carregar_vendas(prefixo_arquivo):
 def carregar_vendas_itens(prefixo_arquivo):
     try:
         df_vi = carregar_do_google(f"{prefixo_arquivo}_vendas_itens")
-        if df_vi.empty: return pd.DataFrame()
+        if df_vi.empty: 
+            return pd.DataFrame()
         df_vi.columns = df_vi.columns.str.strip().str.lower()
-        if 'data_hora' in df_vi.columns: df_vi['data_hora'] = pd.to_datetime(df_vi['data_hora'], errors='coerce')
+        if 'data_hora' in df_vi.columns:
+            df_vi['data_hora'] = pd.to_datetime(df_vi['data_hora'], errors='coerce')
         for c in ['qtd_vendida', 'preco_unit', 'valor_total']:
-            if c in df_vi.columns: df_vi[c] = df_vi[c].apply(parse_num_br)
+            if c in df_vi.columns:
+                df_vi[c] = df_vi[c].apply(parse_num_br)
         if 'código_barras' in df_vi.columns:
             df_vi['código_barras'] = df_vi['código_barras'].astype(str).str.replace('.0','',regex=False).str.strip()
         if 'produto' in df_vi.columns:
             df_vi['produto'] = df_vi['produto'].astype(str).apply(normalizar_texto)
         return df_vi
-    except: return pd.DataFrame()
+    except:
+        return pd.DataFrame()
 
 def carregar_vendas_transacoes(prefixo_arquivo):
     try:
         df_vt = carregar_do_google(f"{prefixo_arquivo}_vendas_transacoes")
-        if df_vt.empty: return pd.DataFrame()
+        if df_vt.empty:
+            return pd.DataFrame()
         df_vt.columns = df_vt.columns.str.strip().str.lower()
-        if 'data_hora' in df_vt.columns: df_vt['data_hora'] = pd.to_datetime(df_vt['data_hora'], errors='coerce')
+        if 'data_hora' in df_vt.columns:
+            df_vt['data_hora'] = pd.to_datetime(df_vt['data_hora'], errors='coerce')
         for c in ['subtotal', 'descontos', 'taxas', 'total']:
-            if c in df_vt.columns: df_vt[c] = df_vt[c].apply(parse_num_br)
+            if c in df_vt.columns:
+                df_vt[c] = df_vt[c].apply(parse_num_br)
         return df_vt
-    except: return pd.DataFrame()
+    except:
+        return pd.DataFrame()
+
+def salvar_vendas_itens(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas_itens", permitir_vazio=True)
+def salvar_vendas_transacoes(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas_transacoes", permitir_vazio=True)
+def salvar_vendas_mensal_produto(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas_mensal_produto", permitir_vazio=True)
+def carregar_mix_review(prefixo_arquivo):
+    try:
+        df_mr = carregar_do_google(f"{prefixo_arquivo}_mix_review")
+        if df_mr.empty: return pd.DataFrame()
+        df_mr.columns = df_mr.columns.str.strip().str.lower()
+        return df_mr
+    except:
+        return pd.DataFrame()
+def salvar_mix_review(df, prefixo): salvar_no_google(df, f"{prefixo}_mix_review", permitir_vazio=True)
+
 
 def carregar_lista_compras(prefixo_arquivo):
     try:
@@ -700,16 +773,6 @@ def carregar_lista_compras(prefixo_arquivo):
         if 'qtd_sugerida' in df.columns: df['qtd_sugerida'] = pd.to_numeric(df['qtd_sugerida'], errors='coerce')
         return df
     except: return pd.DataFrame()
-
-def carregar_mix_review(prefixo_arquivo):
-    try:
-        df_mr = carregar_do_google(f"{prefixo_arquivo}_mix_review")
-        if df_mr.empty:
-            return pd.DataFrame(columns=['data_criacao','codigo_barras','produto','status','motivo','ultima_venda','dias_sem_venda','meses_sem_venda','observacao','decisao'])
-        df_mr.columns = df_mr.columns.str.strip()
-        return df_mr
-    except:
-        return pd.DataFrame(columns=['data_criacao','codigo_barras','produto','status','motivo','ultima_venda','dias_sem_venda','meses_sem_venda','observacao','decisao'])
 
 # --- XML ---
 def ler_xml_nfe(arquivo_xml, df_referencia):
@@ -792,7 +855,6 @@ def ler_xml_nfe(arquivo_xml, df_referencia):
                 item['preco_un_bruto'] = vProd / qCom  
                 item['desconto_total_item'] = vDesc    
                 item['preco_un_liquido'] = (vProd - vDesc) / qCom 
-            
             ean_xml = str(item['ean']).strip()
             if ean_xml in ['SEM GTIN', '', 'None', 'NAN']:
                 item['ean'] = item['codigo_interno']
@@ -811,10 +873,6 @@ def salvar_historico(df, prefixo): salvar_no_google(df, f"{prefixo}_historico_co
 def salvar_movimentacoes(df, prefixo): salvar_no_google(df, f"{prefixo}_movimentacoes")
 def salvar_vendas(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas")
 def salvar_lista_compras(df, prefixo): salvar_no_google(df, f"{prefixo}_lista_compras", permitir_vazio=True)
-def salvar_vendas_itens(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas_itens", permitir_vazio=True)
-def salvar_vendas_transacoes(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas_transacoes", permitir_vazio=True)
-def salvar_vendas_mensal_produto(df, prefixo): salvar_no_google(df, f"{prefixo}_vendas_mensal_produto", permitir_vazio=True)
-def salvar_mix_review(df_mix, prefixo_arquivo): salvar_no_google(df_mix, f"{prefixo_arquivo}_mix_review", permitir_vazio=True)
 
 # ==============================================================================
 # 🚀 INÍCIO DO APP
@@ -1019,8 +1077,8 @@ if df is not None:
                 col_qtd_plan = next((c for c in df_plan.columns if 'qtd' in c.lower() and 'estoque' in c.lower()), None)
                 
                 if col_cod_plan and col_qtd_plan:
-                    df_plan['código normalizado'] = df_plan[col_cod_plan].astype(str).str.replace('.0', '').str.strip().str.lstrip('0')
-                    df['código normalizado'] = df['código de barras'].astype(str).str.replace('.0', '').str.strip().str.lstrip('0')
+                    df_plan['código normalizado'] = df_plan[col_cod_plan].astype(str).str.replace('.0', '').str.strip()
+                    df['código normalizado'] = df['código de barras'].astype(str).str.replace('.0', '').str.strip()
                     df_concilia = pd.merge(df[['código normalizado', 'nome do produto', 'qtd.estoque']], df_plan[[col_cod_plan, col_qtd_plan, 'código normalizado']], on='código normalizado', how='inner')
                     df_concilia['Diferença'] = df_concilia['qtd.estoque'] - df_concilia[col_qtd_plan]
                     df_divergente = df_concilia[df_concilia['Diferença'] != 0].copy()
@@ -1047,7 +1105,7 @@ if df is not None:
                                             itens_corrigidos += 1
                                 salvar_estoque(df, prefixo)
                                 salvar_logs_em_lote(prefixo, logs_concilia) 
-                                st.success(f"✅ {itens_corrigidos} items corrigidos!")
+                                st.success(f"✅ {itens_corrigidos} itens corrigidos!")
                                 st.rerun()
                         with c_dir:
                             df_export = df_divergente[~df_editor_concilia['✅ Aceitar Qtd Shoppbud (Corrigir App)']].copy()
@@ -1274,7 +1332,7 @@ if df is not None:
                     st.success("Cadastrado!")
                     st.rerun()
 
-    # --- CIRURGIA 3: SALVAR CÓDIGO NO HISTÓRICO XML ---
+    # --- CIRURGIA 3: SALVAR O CÓDIGO NO XML ---
     elif modo == "📥 Importar XML (Associação Inteligente)":
         st.title(f"📥 Importar XML")
         df_hist = carregar_historico(prefixo)
@@ -1337,27 +1395,12 @@ if df is not None:
                                  cod_barras_hist = parts[0].strip()
                                  nome_final = parts[1].strip()
                              else:
-                                 nome_final = raw_sel
+                                 nome_final = raw_sel.strip()
                         else:
                              nome_final = item['nome'].upper()
 
                         if esc == "(CRIAR NOVO)":
-                            novo = {
-                                'código de barras': item['ean'], 
-                                'nome do produto': nome_final, 
-                                'qtd.estoque': 0, 
-                                'qtd_central': item['qtd'] if "Atualizar" in modo_import else 0, 
-                                'qtd_minima': 5, 
-                                'validade': None, 
-                                'status_compra': 'OK', 
-                                'qtd_comprada': 0, 
-                                'preco_custo': item['preco_un_liquido'], 
-                                'preco_venda': item['preco_un_liquido']*2, 
-                                'categoria': 'GERAL', 
-                                'ultimo_fornecedor': dados['fornecedor'], 
-                                'preco_sem_desconto': item['preco_un_bruto'], 
-                                'status': 'Ativo'
-                            }
+                            novo = {'código de barras': item['ean'], 'nome do produto': nome_final, 'qtd.estoque': 0, 'qtd_central': item['qtd'] if "Atualizar" in modo_import else 0, 'qtd_minima': 5, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': item['preco_un_liquido'], 'preco_venda': item['preco_un_liquido']*2, 'categoria': 'GERAL', 'ultimo_fornecedor': dados['fornecedor'], 'preco_sem_desconto': item['preco_un_bruto'], 'status': 'Ativo'}
                             df = pd.concat([df, pd.DataFrame([novo])], ignore_index=True)
                             if "Atualizar" in modo_import: logs_xml.append({'data_hora': str(data_lancamento_final), 'produto': nome_final, 'qtd_antes': 0, 'qtd_nova': item['qtd'], 'acao': "XML Novo", 'motivo': "Entrada Casa"})
                         else:
@@ -1375,7 +1418,7 @@ if df is not None:
                         novos_hist.append({
                             'data': str(data_lancamento_final), 
                             'data_emissao': data_xml_str, 
-                            'código_barras': cod_barras_hist, # Agora salva o código!
+                            'código_barras': cod_barras_hist, 
                             'produto': nome_final, 
                             'fornecedor': dados['fornecedor'], 
                             'qtd': item['qtd'], 
@@ -1399,7 +1442,7 @@ if df is not None:
         if arq and st.button("Processar"):
             if processar_excel_oficial(arq): st.success("Base atualizada!"); st.rerun()
 
-    # --- CIRURGIA 1 E 2: DTYPE=STR E FUGA DA COLUNA PADRÃO ---
+    # --- CIRURGIA 2: PLANOGRAMA BLINDADO E COM LUPA ---
     elif modo == "🔄 Sincronizar (Planograma)":
         st.title(f"🔄 Sincronizar - {loja_atual}")
         arquivo = st.file_uploader("📂 Planograma", type=['xlsx', 'xls', 'csv'])
@@ -1429,20 +1472,19 @@ if df is not None:
                             if k in c: return i
                     return default
                 
-                idx_barras = next((i for i, c in enumerate(cols_lower) if 'barras' in c or 'ean' in c), -1)
+                idx_barras = find_idx(['barras', 'ean', 'gtin'], -1)
                 if idx_barras == -1: idx_barras = find_idx(['código', 'codigo'], 0)
                 
-                idx_nome = next((i for i, c in enumerate(cols_lower) if 'produto' in c or 'nome' in c), 1)
+                idx_nome = find_idx(['produto', 'nome', 'descrição'], 1 if len(cols)>1 else 0)
                 
-                # FOGE DA COLUNA PADRÃO E ACHA A DE ESTOQUE
-                idx_qtd = next((i for i, c in enumerate(cols_lower) if 'estoque' in c), -1)
+                idx_qtd = find_idx(['estoque', 'físico', 'quantidade real'], -1)
                 if idx_qtd == -1:
                     for i, c in enumerate(cols_lower):
                         if 'qtd' in c and 'padr' not in c:
                             idx_qtd = i
                             break
-                    if idx_qtd == -1: idx_qtd = len(cols)-1
-                    
+                if idx_qtd == -1: idx_qtd = len(cols)-1
+                
                 idx_preco = find_idx(['consumidor', 'venda', 'preço final', 'preco'], -1)
 
                 st.info("🎯 **Mapeamento Automático:** Confirme abaixo se o sistema achou as colunas certas!")
@@ -1459,11 +1501,9 @@ if df is not None:
                     novos_prods = []
                     logs_plano = [] 
                     
-                    df_raw['codigo_limpo'] = df_raw[col_barras].astype(str).str.replace('.0', '', regex=False).str.strip().str.lower()
-                    
+                    df_raw['codigo_limpo'] = df_raw[col_barras].apply(padronizar_codigo_barras)
                     invalidos = ["", "nan", "none", "sem gtin", "0", "0000000000000", "nao informado"]
                     df_raw = df_raw[~df_raw['codigo_limpo'].isin(invalidos)]
-                    
                     df_raw[col_qtd] = df_raw[col_qtd].apply(parse_num_br)
                     
                     agg_dict = { col_nome: 'first', col_qtd: 'sum' }
@@ -1481,37 +1521,38 @@ if df is not None:
                     
                     for i, row in df_agrupado.iterrows():
                         try:
-                            cod_limpo = row['codigo_limpo'].lstrip('0') 
+                            cod_limpo = row['codigo_limpo']
                             nome = normalizar_texto(str(row[col_nome]))
                             qtd = row[col_qtd]
                             
-                            if cod_limpo and nome:
-                                mask = pd.Series(False, index=df.index)
-                                if cod_limpo and cod_limpo not in ["", "nan", "none"]:
-                                    mask = df['código de barras'].apply(padronizar_codigo_barras) == cod_limpo
+                            if nome:
+                                idx_encontrado = None
+                                if cod_limpo and len(cod_limpo) >= 4:
+                                    mask_cod = df['código de barras'].apply(padronizar_codigo_barras) == cod_limpo
+                                    if mask_cod.any(): idx_encontrado = df[mask_cod].index[0]
                                 
-                                if not mask.any():
-                                    mask = df['nome do produto'].apply(normalizar_texto) == nome
+                                if idx_encontrado is None:
+                                    mask_nome = df['nome do produto'] == nome
+                                    if mask_nome.any(): idx_encontrado = df[mask_nome].index[0]
+
+                                if idx_encontrado is not None:
+                                    antigo = df.at[idx_encontrado, 'qtd.estoque']
+                                    df.at[idx_encontrado, 'qtd.estoque'] = qtd
                                     
-                                if mask.any():
-                                    idx = df[mask].index[0]
-                                    antigo = df.at[idx, 'qtd.estoque']
-                                    df.at[idx, 'qtd.estoque'] = qtd
-                                    
-                                    cod_atual = padronizar_codigo_barras(df.at[idx, 'código de barras'])
-                                    if not cod_atual and cod_limpo:
-                                        df.at[idx, 'código de barras'] = row[col_barras]
+                                    cod_atual = padronizar_codigo_barras(df.at[idx_encontrado, 'código de barras'])
+                                    if not cod_atual and cod_limpo and len(cod_limpo) >= 4:
+                                        df.at[idx_encontrado, 'código de barras'] = row[col_barras]
 
                                     if antigo != qtd: 
                                         logs_plano.append({'data_hora': str(obter_hora_manaus()), 'produto': nome, 'qtd_antes': antigo, 'qtd_nova': qtd, 'acao': "Sincronização", 'motivo': "Planograma"})
                                     if col_preco != "(Ignorar)":
                                         val = row[col_preco]
-                                        if pd.notnull(val): df.at[idx, 'preco_venda'] = val
+                                        if pd.notnull(val): df.at[idx_encontrado, 'preco_venda'] = val
                                 else:
                                     val_p = 0.0
                                     if col_preco != "(Ignorar)": 
                                         val_p = row[col_preco] if pd.notnull(row[col_preco]) else 0.0
-                                    novos_prods.append({'código de barras': row[col_barras], 'nome do produto': nome, 'qtd.estoque': qtd, 'qtd_central': 0, 'qtd_minima': 5, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': 0.0, 'preco_venda': val_p, 'categoria': 'GERAL', 'ultimo_fornecedor': '', 'preco_sem_desconto': 0.0, 'status': 'Ativo'})
+                                    novos_prods.append({'código de barras': row[col_barras] if len(cod_limpo)>=4 else "", 'nome do produto': nome, 'qtd.estoque': qtd, 'qtd_central': 0, 'qtd_minima': 5, 'validade': None, 'status_compra': 'OK', 'qtd_comprada': 0, 'preco_custo': 0.0, 'preco_venda': val_p, 'categoria': 'GERAL', 'ultimo_fornecedor': '', 'preco_sem_desconto': 0.0, 'status': 'Ativo'})
                         except: pass
                         bar.progress((i+1)/total_linhas)
                     
@@ -1522,7 +1563,6 @@ if df is not None:
                     st.rerun()
 
     elif modo == "📈 Vendas (Importar & 80/20)":
-
         st.title(f"📈 Vendas - Importar & 80/20 ({loja_atual})")
         st.markdown(
             "Importe as planilhas do Shoppbud e o sistema vai: **(1)** gravar o histórico na nuvem, "
@@ -1560,26 +1600,20 @@ if df is not None:
                 def detectar_tipo(cols, nome_arquivo: str = ""):
                     cols_norm = [normalizar_para_busca(c) for c in cols if c is not None]
                     joined = " | ".join(cols_norm)
-
                     nome_norm = normalizar_para_busca(nome_arquivo or "")
                     if "SALES-BY-TRANSACTION" in nome_norm or "BY-TRANSACTION" in nome_norm: return "transacoes"
                     if nome_norm.startswith("SALES-") and "BY-TRANSACTION" not in nome_norm and "SALES BY TRANSACTION" not in nome_norm: return "itens"
-
                     tem_produto = any(("PRODUTO" in c) or ("ITEM" == c) for c in cols_norm)
                     tem_qtd = any(("QTD" in c) or ("QUANT" in c) for c in cols_norm)
                     tem_id_trans = any(("ID" in c and "TRANS" in c) or ("TRANSACAO" in c) for c in cols_norm)
-
                     if tem_produto and tem_qtd: return "itens"
-                    
                     tem_subtotal = any("SUBTOTAL" in c for c in cols_norm)
                     tem_total = any((c == "TOTAL") or ("VALOR TOTAL" in c) or ("TOTAL" in c and "VALOR" in c) for c in cols_norm)
                     tem_taxa = any(("TAXA" in c) or ("TAXAS" in c) for c in cols_norm)
                     tem_desc = any(("DESC" in c) or ("DESCONTO" in c) for c in cols_norm)
                     if tem_id_trans and (tem_subtotal or tem_total or tem_taxa or tem_desc): return "transacoes"
-
                     tem_data = any("DATA" == c or "DATA" in c for c in cols_norm)
                     if tem_id_trans and tem_data: return "transacoes"
-
                     return "desconhecido"
 
                 def mes_ref_from_dt(dt_val):
@@ -1871,7 +1905,7 @@ if df is not None:
                 if not df_vt.empty: st.dataframe(df_vt.sort_values(by='data_hora', ascending=False).head(500), use_container_width=True, hide_index=True)
                 else: st.info("Vazio.")
 
-    # --- CIRURGIA 4: RAIO-X PUXANDO 30 DIAS E CRUZANDO COM CÓDIGO DE BARRAS ---
+    # --- CIRURGIA 4: RAIO-X 30 DIAS ---
     elif modo == "🔎 Raio-X do Estoque (Auditoria)":
         st.title(f"🔎 Raio-X do Estoque - {loja_atual}")
         st.markdown(
@@ -1949,12 +1983,9 @@ if df is not None:
 
                     qtd_venda = 0
                     if not df_v.empty:
-                        if 'código_barras' in df_v.columns and cod_limpo:
-                            mask_v_cod = df_v['código_barras'].apply(padronizar_codigo_barras) == cod_limpo
-                            mask_v_nome = df_v['produto'].astype(str).str.upper() == nome.upper()
-                            mask_v = mask_v_cod | mask_v_nome
-                        else:
-                            mask_v = df_v['produto'].astype(str).str.upper() == nome.upper()
+                        mask_v_cod = df_v['código_barras'].apply(padronizar_codigo_barras) == cod_limpo if cod_limpo and 'código_barras' in df_v.columns else pd.Series(False, index=df_v.index)
+                        mask_v_nome = df_v['produto'].astype(str).str.upper() == nome.upper()
+                        mask_v = mask_v_cod | mask_v_nome if cod_limpo else mask_v_nome
                         qtd_venda = df_v[mask_v]['qtd_vendida'].sum()
 
                     if apenas_movimentados and qtd_compra == 0 and qtd_venda == 0:
@@ -2416,7 +2447,7 @@ if df is not None:
                     st.success("Tabela Geral atualizada!")
                     st.rerun()
             with c2:
-                if st.button("🔮 CORRIGIR NOMES E UNIFICAR (Pelo Nome e Código)"):
+                if st.button("🔮 CORRIGIR NOMES E UNIFICAR (Pelo Código e Nome)"):
                     df.update(df_edit)
                     qtd_antes = len(df)
                     df = unificar_produtos_por_codigo(df)
@@ -2426,7 +2457,7 @@ if df is not None:
                     st.balloons()
                     st.rerun()
 
-    # --- CIRURGIA 5: BOTÃO ZERAR LOJA E MÁQUINA DO TEMPO FUZZY ---
+    # --- CIRURGIA 6: MÁQUINA DO TEMPO BLINDADA ---
     elif modo == "🛠️ Ajuste & Limpeza":
         st.title("🛠️ Ajuste & Limpeza de Estoque")
         st.info("Ferramentas para corrigir erros e limpar o cadastro.")
@@ -2439,7 +2470,7 @@ if df is not None:
             st.success("✅ Banco de dados apagado com sucesso! Vá em Sincronizar Planograma e importe a planilha limpa.")
             time.sleep(3)
             st.rerun()
-        
+            
         st.divider()
         c_z1, c_z2 = st.columns(2)
         with c_z1:
@@ -2492,7 +2523,7 @@ if df is not None:
 
         st.divider()
         st.markdown("### 🪄 Máquina do Tempo: Reconstruir Estoque da Casa")
-        st.write("O sistema vai ler o histórico das suas notas fiscais antigas, vai achar qual é o produto correto no seu sistema atual usando aproximação de nome e vai injetar a quantidade na Casa. **Ele tem trava contra misturar produtos parecidos (ex: 2L com 200ML).**")
+        st.write("O sistema vai ler o histórico das suas notas fiscais antigas, achar qual é o produto correto no seu sistema atual usando aproximação de nome e injetar a quantidade na Casa. **Ele tem trava contra misturar produtos parecidos (ex: 2L com 200ML).**")
         
         if st.button("🚀 RECONSTRUIR CASA AGORA (Baseado no Histórico)", type="primary"):
             with st.spinner("Lendo todos os históricos e usando Inteligência de Busca para repor a Casa..."):
@@ -2500,37 +2531,32 @@ if df is not None:
                 df_v = carregar_vendas_itens(prefixo)
                 count_rec = 0
                 
-                # 1. Zera a Casa atual para recalcular limpo
-                df['qtd_central'] = 0
+                df['qtd_central'] = 0 
                 
-                # 2. Injeta as Compras
                 if not df_c.empty:
                     lista_nomes_sis = df['nome do produto'].tolist()
                     for _, row_c in df_c.iterrows():
                         qtd_comprada = float(row_c.get('qtd', 0))
                         if qtd_comprada <= 0: continue
                         
-                        nome_hist = str(row_c.get('produto', '')).strip()
+                        nome_hist = str(row_c.get('produto', '')).strip().upper()
                         cod_hist = str(row_c.get('código_barras', '')).strip()
                         cod_hist_limpo = padronizar_codigo_barras(cod_hist)
                         
                         idx_alvo = None
                         
-                        # Tenta achar o produto pelo código primeiro
                         if cod_hist_limpo and 'código de barras' in df.columns:
-                            mask = df['código de barras'].apply(padronizar_codigo_barras) == cod_hist_limpo
-                            if mask.any(): idx_alvo = df[mask].index[0]
+                            mask_c = df['código de barras'].apply(padronizar_codigo_barras) == cod_hist_limpo
+                            if mask_c.any(): idx_alvo = df[mask_c].index[0]
                         
-                        # IA: Tenta achar pelo Nome Aproximado se o XML não tiver Código
                         if idx_alvo is None and nome_hist:
-                            melhor_nome, status_match = encontrar_melhor_match(nome_hist, lista_nomes_sis, cutoff=0.35)
+                            melhor_nome, _ = encontrar_melhor_match(nome_hist, lista_nomes_sis, cutoff=0.35)
                             if melhor_nome:
                                 idx_alvo = df[df['nome do produto'] == melhor_nome].index[0]
                                 
                         if idx_alvo is not None:
                             df.at[idx_alvo, 'qtd_central'] += qtd_comprada
 
-                # 3. Subtrai as Vendas e o que já foi pra Loja
                 for idx, row in df.iterrows():
                     cod_limpo = padronizar_codigo_barras(row.get('código de barras', ''))
                     nome_sis = str(row.get('nome do produto', '')).strip().upper()
@@ -2540,7 +2566,8 @@ if df is not None:
                     if not df_v.empty:
                         if cod_limpo and 'código_barras' in df_v.columns:
                             m_cod = df_v['código_barras'].apply(padronizar_codigo_barras) == cod_limpo 
-                        else: m_cod = pd.Series(False, index=df_v.index)
+                        else:
+                            m_cod = pd.Series(False, index=df_v.index)
                         m_nome = df_v['produto'].astype(str).str.upper() == nome_sis
                         qv = float(df_v[m_cod | m_nome]['qtd_vendida'].sum())
                         
@@ -2587,12 +2614,12 @@ if df is not None:
                 try:
                     if arq.name.endswith('.csv'):
                         try:
-                            df_temp = pd.read_csv(arq, dtype=str)
+                            df_temp = pd.read_csv(arq)
                         except:
                             arq.seek(0)
-                            df_temp = pd.read_csv(arq, sep=';', dtype=str)
+                            df_temp = pd.read_csv(arq, sep=';')
                     else:
-                        df_temp = pd.read_excel(arq, dtype=str)
+                        df_temp = pd.read_excel(arq)
                     
                     df_temp.columns = df_temp.columns.str.strip().str.lower()
                     
